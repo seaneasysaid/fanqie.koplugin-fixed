@@ -238,11 +238,13 @@ end
 
 
 function FanQiePlugin:onDispatcherRegisterActions()
+    -- 参考内置插件模式：用 general=true，让动作在 FileManager 和 Reader
+    -- 的手势管理「General」分类下都可绑定、可触发（不局限于某个上下文）。
     Dispatcher:registerAction("show_fanqie_bookshelf", {
         category = "none",
         event = "ShowFanQieBookshelf",
         title = _("番茄书架"),
-        filemanager = true,
+        general = true,
     })
     Dispatcher:registerAction("return_fanqie_toc", {
         category = "none",
@@ -417,26 +419,31 @@ function FanQiePlugin:showParaReviewDetail(index)
         Async.run(function()
             local c = Client:new(self_ref.settings)
             local ident_str = tostring(ident)
-            local is_dahuilang = ident_str:find("czyl.cf", 1, true)
-            local is_qingtian = ident_str:find("gyks.cf", 1, true)
+            local is_zhiqiu    = ident_str:find("zhiqiu:", 1, true)
+            local is_shushan   = ident_str:find("shushan:", 1, true)
 
             if Log then
                 Log.info("[段评] showParaReviewDetail(异步): idx=" .. tostring(review_index)
-                    .. " is_dahuilang=" .. tostring(is_dahuilang)
-                    .. " is_qingtian=" .. tostring(is_qingtian)
+                    .. " is_zhiqiu=" .. tostring(is_zhiqiu)
+                    .. " is_shushan=" .. tostring(is_shushan)
                     .. " ident=" .. ident_str:sub(1, 80))
             end
 
             local ok, result
-            if is_dahuilang and not is_qingtian then
-                ok, result = pcall(function() return c:dahuilang_get_para_review(ident) end)
-            elseif is_qingtian and not is_dahuilang then
-                ok, result = pcall(function() return c:qingtian_get_para_review(ident) end)
-            else
-                ok, result = pcall(function() return c:qingtian_get_para_review(ident) end)
-                if not ok or not result then
-                    ok, result = pcall(function() return c:dahuilang_get_para_review(ident) end)
+            if is_shushan then
+                -- 书山自有段落级段评 JSON 通道（GET /idea_comment?api=1，2026-09-13 实测可用），
+                -- 不再依赖知秋。ident 格式 shushan:<bid>:<cid>:<pid>，返回番茄原生结构，
+                -- 与 _displayParaReviewDetail 解析器兼容。
+                ok, result = pcall(function() return c:shushan_get_para_review(ident) end)
+                if not ok then
+                    error("书山段评获取失败：" .. tostring(result or "")
+                        .. "（请确认书山账号已登录、Android ID 为真实设备）")
                 end
+            elseif is_zhiqiu then
+                ok, result = pcall(function() return c:zhiqiu_get_para_review(ident) end)
+            else
+                -- 无法识别的 ident（多为旧缓存中已移除书源的历史段评）
+                error("无法识别段评来源: " .. ident_str:sub(1, 60))
             end
             if not ok then error(result or "段评获取失败") end
             return result
@@ -447,18 +454,21 @@ function FanQiePlugin:showParaReviewDetail(index)
         -- 降级：Async 模块未加载（极端情况），同步执行
         local c = self_ref.client or Client:new(self_ref.settings)
         local ident_str = tostring(ident)
-        local is_dahuilang = ident_str:find("czyl.cf", 1, true)
-        local is_qingtian = ident_str:find("gyks.cf", 1, true)
+        local is_zhiqiu    = ident_str:find("zhiqiu:", 1, true)
+        local is_shushan   = ident_str:find("shushan:", 1, true)
         local ok, result
-        if is_dahuilang and not is_qingtian then
-            ok, result = pcall(function() return c:dahuilang_get_para_review(ident) end)
-        elseif is_qingtian and not is_dahuilang then
-            ok, result = pcall(function() return c:qingtian_get_para_review(ident) end)
-        else
-            ok, result = pcall(function() return c:qingtian_get_para_review(ident) end)
-            if not ok or not result then
-                ok, result = pcall(function() return c:dahuilang_get_para_review(ident) end)
+        if is_shushan then
+            -- 书山自有段评通道（不依赖知秋）
+            ok, result = pcall(function() return c:shushan_get_para_review(ident) end)
+            if not ok then
+                error("书山段评获取失败：" .. tostring(result or "")
+                    .. "（请确认书山账号已登录、Android ID 为真实设备）")
             end
+        elseif is_zhiqiu then
+            ok, result = pcall(function() return c:zhiqiu_get_para_review(ident) end)
+        else
+            -- 无法识别的 ident（多为旧缓存中已移除书源的历史段评）
+            ok, result = false, "无法识别段评来源: " .. ident_str:sub(1, 60)
         end
         self_ref:_displayParaReviewDetail(review_index, total_reviews, ok, result, nil)
     end
@@ -467,6 +477,14 @@ end
 -- 显示段评详情弹窗（纯 UI 渲染，不做网络请求）
 function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result, err)
     local self = self
+    -- 懒加载富排版段评弹框（含 freetype/xtext 渲染管线），仅在本弹框真正要展示时拉取
+    local ok_reviewpopup, ReviewPopup = pcall(require, "fanqie.review_popup")
+    if not ok_reviewpopup or not ReviewPopup then
+        if Log then Log.error("[段评] review_popup 加载失败:", tostring(ReviewPopup)) end
+        self:closeBusy()
+        self:showInfo(_("段评富排版组件加载失败，请检查 fanqie/review_popup 模块"))
+        return
+    end
     -- 章节切换中：异步段评获取完成时可能已进入新章节，丢弃过期的段评弹窗
     if _state.isChapterNavigating() then
         if Log then Log.debug("[段评] _displayParaReviewDetail: 章节切换中，丢弃段评弹窗") end
@@ -556,74 +574,92 @@ function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result,
     self:closeBusy()
 
     if #comments > 0 then
-        local text_parts = {}
-        for i, comment in ipairs(comments) do
+        -- ================================================================
+        -- B 档：把段评弹框从纯 TextViewer 换成微信读书「想法」式富排版弹框
+        -- （移植自 weread.koplugin 的 thought_popup 渲染管线，见 fanqie/review_popup/）
+        -- ================================================================
+        -- 归一再展示: 取第一条非空 para_src 作为整段引文(abstract)，没有则不显示引文
+        local abstract = ""
+        for _, c0 in ipairs(comments) do
+            local src = tostring(c0.para_src or c0.abstract or "")
+            if src ~= "" then abstract = src break end
+        end
+
+        -- 归一化 items: { abstract, author, content, likes_count }
+        local rich_items = {}
+        for _, comment in ipairs(comments) do
             local username = tostring(comment.username or comment.user_name
                 or (comment.user and comment.user.user_name)
                 or (comment.user and comment.user.nick_name)
                 or comment.nick_name or comment.nickname or "匿名")
             local content_text = tostring(comment.text or comment.content or "")
-            local like_count = tonumber(comment.like_count or comment.likeCount or comment.digg_count) or 0
-            local reply_count = tonumber(comment.reply_count or comment.replyCount) or 0
-            local raw_time = comment.create_time or comment.create_at or comment.time or comment.create_timestamp
-            local time_str = ""
-            if type(raw_time) == "number" then
-                -- create_timestamp 是秒级时间戳
-                time_str = os.date("%Y-%m-%d %H:%M", raw_time)
-            elseif raw_time then
-                time_str = tostring(raw_time)
+            local like_count = tonumber(comment.like_count or comment.likeCount
+                or comment.digg_count) or 0
+            if content_text ~= "" then
+                table.insert(rich_items, {
+                    abstract = abstract,
+                    author = username,
+                    content = content_text,
+                    likes_count = like_count,
+                })
             end
-
-            local header = string.format("%d. %s (赞%d 回复%d)", i, username, like_count, reply_count)
-            if time_str ~= "" then
-                header = header .. "  " .. time_str
-            end
-            table.insert(text_parts, header .. "\n" .. content_text)
         end
 
-        local review_text = table.concat(text_parts, "\n\n")
+        if #rich_items == 0 then
+            self:showInfo(T(_("本条段评共 %1 条评论，暂无显示数据"), tostring(total)))
+            return
+        end
 
-        local buttons_table = {}
-        local nav_row = {}
-        if index > 1 then
-            table.insert(nav_row, {
-                text = _("上一段"),
-                callback = function()
-                    UIManager:close(self._para_viewer)
-                    self:showParaReviewDetail(index - 1)
-                end,
-            })
+        -- 段落 上一段/下一段：横向滑动切换（在弹框内仍可上下滚动/翻页查看全部评论）
+        local function navigate_para(delta)
+            local target = index + delta
+            if target < 1 or target > total_reviews then return end
+            ReviewPopup.closeVisible()
+            -- 延迟一帧，等旧弹框从 UIManager 出栈后再打开下一段
+            UIManager:nextTick(function()
+                self:showParaReviewDetail(target)
+            end)
         end
-        if index < total_reviews then
-            table.insert(nav_row, {
-                text = _("下一段"),
-                callback = function()
-                    UIManager:close(self._para_viewer)
-                    self:showParaReviewDetail(index + 1)
-                end,
-            })
-        end
-        if #nav_row > 0 then
-            table.insert(buttons_table, nav_row)
-        end
-        table.insert(buttons_table, {
-            {
-                text = _("关闭"),
-                callback = function()
-                    UIManager:close(self._para_viewer)
-                end,
-            },
-        })
 
-        self._para_viewer = TextViewer:new{
-            title = T(_("段评 %1/%2 (共%3条)"), tostring(index),
-                tostring(total_reviews), tostring(total)),
-            text = review_text,
-            text_type = "book_info",
-            justified = false,
-            buttons_table = buttons_table,
+        local opts = {
+            pages = rich_items,
+            position = "bottom",
+            height_ratio = 0.7,
+            contrast = 7,
+            tap_to_page = true,
+            para_nav = function(dir)
+                if dir == "prev" then navigate_para(-1)
+                else navigate_para(1) end
+            end,
+            doc_font_name = nil,
+            doc_font_size = nil,
+            doc_margins = nil,
         }
-        UIManager:show(self._para_viewer)
+
+        -- 从当前阅读器 ui 读取正文字体/字号/边距（带降级，读不到就交给弹框默认）
+        if self.ui then
+            local ok_dev, Device = pcall(require, "device")
+            local Screen = ok_dev and Device and Device.screen
+            local font_face
+            if self.ui.font and self.ui.font.font_face then
+                font_face = self.ui.font.font_face
+            elseif G_reader_settings then
+                font_face = G_reader_settings:readSetting("cre_font")
+            end
+            opts.doc_font_name = font_face
+            local doc = self.ui.document
+            local doc_font_size = (doc and doc.configurable and doc.configurable.font_size) or 18
+            if Screen and Screen.scaleBySize then
+                -- 弹框字号比正文小一号（KOReader 每档 = 整数值 ±1，见 readerfont）
+                opts.doc_font_size = Screen:scaleBySize(math.max(doc_font_size - 1, 10))
+            end
+            if doc and doc.getPageMargins then
+                local okm, margins = pcall(function() return doc:getPageMargins() end)
+                if okm and margins then opts.doc_margins = margins end
+            end
+        end
+
+        ReviewPopup.show(opts)
     else
         self:showInfo(T(_("本条段评共 %1 条评论，暂无显示数据"), tostring(total)))
     end
@@ -879,137 +915,228 @@ function FanQiePlugin:getSourceDetailMenuItems(source_id)
         })
     end
 
-    -- Qingtian-specific: server / account / password + auto-login + login status
-    if source_id == "qingtian" then
+    -- ZhiQiu (知秋) branch: configure the three credentials (源作者/官方反馈群/
+    -- 临时Token口令) that mint the shared token, or paste a token directly.
+    if source_id == "zhiqiu" then
         table.insert(items, {
-            text = _("服务器/账号设置"),
+            text = _("服务器/Token设置"),
             keep_menu_open = true,
             callback = function(touchmenu_instance)
-                self:showQingtianConfigDialog(touchmenu_instance)
-            end,
-        })
-        table.insert(items, {
-            text = _("检测可用线路"),
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                self:showServerDetectionDialog("qingtian", touchmenu_instance)
+                self:showZhiQiuConfigDialog(touchmenu_instance)
             end,
         })
         table.insert(items, {
             text_func = function()
-                local c = self.settings:get_source(source_id)
-                return c.auto_login ~= false and _("自动登录: 开") or _("自动登录: 关")
-            end,
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                local c = self.settings:get_source(source_id)
-                self.settings:set_source_field(source_id, "auto_login", c.auto_login == false)
-                if touchmenu_instance then touchmenu_instance:updateItems() end
-            end,
-        })
-        table.insert(items, {
-            text_func = function()
-                local c = self.settings:get_source(source_id)
-                local token = c.token or ""
-                if token ~= "" then
-                    return _("已登录 (点击退出)")
-                else
-                    return _("未登录")
+                local c = self.settings:get_source("zhiqiu")
+                local tok = H.trim(c.token or "")
+                if tok ~= "" then return _("共享Token: 已配置") end
+                -- No token stored yet → can self-mint from the three credentials.
+                local a = H.trim(c.source_author or "")
+                local g = H.trim(c.group_id or "")
+                local p = H.trim(c.temp_token_pass or "")
+                if a ~= "" and g ~= "" and p ~= "" then
+                    return _("共享Token: 自动获取(三件套已填)")
                 end
-            end,
-            enabled_func = function()
-                local c = self.settings:get_source(source_id)
-                return (c.token or "") ~= ""
+                return _("共享Token: 未配置")
             end,
             keep_menu_open = true,
-            callback = function()
-                UIManager:show(ConfirmBox:new{
-                    text = _("确定退出晴天登录？\n将清除已保存的 token 和设备ID。"),
-                    ok_text = _("退出登录"),
-                    cancel_text = _("取消"),
-                    ok_callback = function()
-                        self.settings:clear_qingtian_token()
-                        local SM = require("fanqie.sources")
-                        SM.rate_limit_reset("qingtian")
+        })
+        table.insert(items, {
+            text = _("获取共享Token（无/已过期时自动铸造）"),
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                self:showBusy(_("正在检查/获取共享Token..."))
+                local settings = self.settings
+                Async.run(function()
+                    local c = Client:new(settings)
+                    local ZhiQiu = require("fanqie.zhiqiu")
+                    -- 知秋服务限制：同一设备仅在无token或token过期后可重新申请
+                    --（有效期内重复申请会返回"用户已存在"）。故此处不强制刷新。
+                    local tok = ZhiQiu.ensure_token(c, settings, false)
+                    return tok
+                end, function(ok, tok, err)
+                    self:closeBusy()
+                    if ok and tok and tok ~= "" then
                         UIManager:show(InfoMessage:new{
-                            text = _("已退出晴天登录"), timeout = 2,
+                            text = _("✅ 共享Token已就绪（3天有效，自动续期）"), timeout = 3,
                         })
-                    end,
+                    elseif ok then
+                        UIManager:show(InfoMessage:new{
+                            text = _("✅ Token有效期内，无需重新获取"), timeout = 3,
+                        })
+                    else
+                        UIManager:show(InfoMessage:new{
+                            text = _("获取失败: ") .. tostring(err), timeout = 4,
+                        })
+                    end
+                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                end)
+            end,
+        })
+        table.insert(items, {
+            text = _("查询Token剩余额度"),
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                self:showBusy(_("正在查询..."))
+                local settings = self.settings
+                Async.run(function()
+                    local c = Client:new(settings)
+                    local ZhiQiu = require("fanqie.zhiqiu")
+                    return ZhiQiu.query_token(c, settings)
+                end, function(ok, info, err)
+                    self:closeBusy()
+                    if ok and info then
+                        UIManager:show(InfoMessage:new{
+                            text = _("日剩余: ") .. tostring(info.left)
+                                .. _("  到期: ") .. tostring(info.ddlTime or ""), timeout = 4,
+                        })
+                    else
+                        UIManager:show(InfoMessage:new{
+                            text = _("查询失败: ") .. tostring(err or "无Token"), timeout = 4,
+                        })
+                    end
+                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                end)
+            end,
+        })
+        table.insert(items, {
+            text = _("清除共享Token"),
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                self.settings:set_source_field("zhiqiu", "token", "")
+                self.settings:set_source_field("zhiqiu", "token_minted_at", "")
+                if touchmenu_instance then touchmenu_instance:updateItems() end
+                UIManager:show(InfoMessage:new{
+                    text = _("已清除共享Token，下次获取时自动重新铸造"), timeout = 3,
                 })
             end,
         })
     end
 
-    -- DahuiLang-specific: config + login + logout
-    if source_id == "dahuilang" then
+    -- ShuShan (书山) branch: email/password + REAL Android id → api_key.
+    -- 书山聚合：一个账号聚合非番茄源，并可用番茄源付费解锁。读正文必须提供
+    -- 已用阅读 app 登录书山的那台安卓设备的真实 Android ID（16hex）。插件
+    -- 不自动生成 id（伪造曾致封号），仅在正文请求时校验。
+    if source_id == "shushan" then
         table.insert(items, {
-            text = _("服务器/账号设置"),
+            text = _("账号/设备设置"),
             keep_menu_open = true,
             callback = function(touchmenu_instance)
-                self:showDahuilangConfigDialog(touchmenu_instance)
-            end,
-        })
-        table.insert(items, {
-            text = _("检测可用线路"),
-            keep_menu_open = true,
-            callback = function(touchmenu_instance)
-                self:showServerDetectionDialog("dahuilang", touchmenu_instance)
+                self:showShuShanConfigDialog(touchmenu_instance)
             end,
         })
         table.insert(items, {
             text_func = function()
-                local c = self.settings:get_source(source_id)
-                local token = c.token or ""
-                if token ~= "" then
-                    return _("已登录 (点击退出)")
-                else
-                    return _("未登录 (点击立即登录)")
+                local c = self.settings:get_source("shushan")
+                local key = H.trim(c.api_key or "")
+                local aid = H.trim(c.android_id or "")
+                if key ~= "" then
+                    return _("登录: 已获取api_key")
                 end
+                local e = H.trim(c.email or "")
+                local p = H.trim(c.password or "")
+                if e ~= "" and p ~= "" then
+                    return _("登录: 已配置凭据(待登录)")
+                end
+                return _("登录: 未配置")
             end,
             keep_menu_open = true,
+        })
+        table.insert(items, {
+            text = _("登录测试（邮箱+密码 → 获取/刷新api_key）"),
+            keep_menu_open = true,
             callback = function(touchmenu_instance)
-                local c = self.settings:get_source(source_id)
-                local token = c.token or ""
-                if token ~= "" then
-                    -- 退出登录
-                    UIManager:show(ConfirmBox:new{
-                        text = _("确定退出大灰狼登录？\n将清除已保存的 token 和设备ID。"),
-                        ok_text = _("退出登录"),
-                        cancel_text = _("取消"),
-                        ok_callback = function()
-                            self.settings:clear_dahuilang_token()
-                            local SM = require("fanqie.sources")
-                            SM.rate_limit_reset("dahuilang")
-                            UIManager:show(InfoMessage:new{
-                                text = _("已退出大灰狼登录"), timeout = 2,
-                            })
-                            if touchmenu_instance then touchmenu_instance:updateItems() end
-                        end,
-                    })
-                else
-                    -- 立即登录（子进程执行 HTTP 登录，不阻塞 UI 线程）
-                    if Client then
-                        self:showBusy(_("正在登录..."))
-                        local settings = self.settings
-                        Async.run(function()
-                            local c = Client:new(settings)
-                            c:dahuilang_login()
-                            return true
-                        end, function(ok_login, _result, err)
-                            self:closeBusy()
-                            if ok_login then
-                                UIManager:show(InfoMessage:new{
-                                    text = _("大灰狼登录成功！"), timeout = 2,
-                                })
-                            else
-                                UIManager:show(InfoMessage:new{
-                                    text = _("登录失败: ") .. tostring(err), timeout = 3,
-                                })
-                            end
-                            if touchmenu_instance then touchmenu_instance:updateItems() end
-                        end, { delay = 0.1, poll_interval = 0.2, timeout = 30 })
+                self:showBusy(_("正在登录书山..."))
+                local settings = self.settings
+                Async.run(function()
+                    local c = Client:new(settings)
+                    return c:shushan_login()
+                end, function(ok, api_key, err)
+                    self:closeBusy()
+                    if ok and api_key and api_key ~= "" then
+                        UIManager:show(InfoMessage:new{
+                            text = _("✅ 书山登录成功！api_key 已保存"), timeout = 3,
+                        })
+                    else
+                        UIManager:show(InfoMessage:new{
+                            text = _("登录失败: ") .. tostring(err), timeout = 4,
+                        })
                     end
-                end
+                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                end)
+            end,
+        })
+        table.insert(items, {
+            text = _("服务器测速（自动切换到最快线路）"),
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                self:showBusy(_("正在测速所有线路..."))
+                local settings = self.settings
+                Async.run(function()
+                    local c = Client:new(settings)
+                    return c:shushan_select_fastest()
+                end, function(ok, data, err)
+                    self:closeBusy()
+                    if ok and data and data.best then
+                        -- 可达节点排前并按延迟升序，不可达的列在后面
+                        local sorted = {}
+                        for _, r in ipairs(data.results or {}) do
+                            sorted[#sorted + 1] = r
+                        end
+                        table.sort(sorted, function(a, b)
+                            if a.ok ~= b.ok then return a.ok end
+                            return (a.ms or 0) < (b.ms or 0)
+                        end)
+                        local lines = {}
+                        for _, r in ipairs(sorted) do
+                            local host = tostring(r.base):gsub("^https?://", "")
+                            if r.ok then
+                                lines[#lines + 1] = string.format("%s  %dms%s",
+                                    host, r.ms,
+                                    (r.base == data.best) and "  <- 已选用" or "")
+                            else
+                                lines[#lines + 1] = string.format("%s  不可达（%s）",
+                                    host, tostring(r.note or "无响应"))
+                            end
+                        end
+                        local best_host = tostring(data.best):gsub("^https?://", "")
+                        local detail = table.concat(lines, "\n")
+                        local msg = "已切换到最快线路: " .. best_host .. "\n----------\n" .. detail
+                        if T then
+                            msg = T(_("已切换到最快线路: %1\n----------\n%2"), best_host, detail)
+                        end
+                        UIManager:show(InfoMessage:new{
+                            text = "✅ " .. msg, timeout = 8,
+                        })
+                    else
+                        UIManager:show(InfoMessage:new{
+                            text = _("测速失败: ") .. tostring((data and data.err) or err),
+                            timeout = 4,
+                        })
+                    end
+                    if touchmenu_instance then touchmenu_instance:updateItems() end
+                end)
+            end,
+        })
+        table.insert(items, {
+            text = _("退出登录（清除api_key）"),
+            keep_menu_open = true,
+            callback = function(touchmenu_instance)
+                UIManager:show(ConfirmBox:new{
+                    text = _("确定退出书山登录？\n将清除已保存的 api_key（保留邮箱/密码/设备ID）。"),
+                    ok_text = _("退出"),
+                    cancel_text = _("取消"),
+                    ok_callback = function()
+                        self.settings:set_source_field("shushan", "api_key", "")
+                        self.settings:set_source_field("shushan", "api_key_at", "")
+                        local SM = require("fanqie.sources")
+                        SM.rate_limit_reset("shushan")
+                        UIManager:show(InfoMessage:new{
+                            text = _("已退出书山登录"), timeout = 2,
+                        })
+                        if touchmenu_instance then touchmenu_instance:updateItems() end
+                    end,
+                })
             end,
         })
     end
@@ -1072,30 +1199,40 @@ function FanQiePlugin:getSourceDetailMenuItems(source_id)
     return items
 end
 
-function FanQiePlugin:showQingtianConfigDialog(touchmenu_instance)
+function FanQiePlugin:showZhiQiuConfigDialog(touchmenu_instance)
     if not MultiInputDialog then
         self:showInfo(_("系统不支持多输入对话框"))
         return
     end
-    local cfg = self.settings:get_source("qingtian")
+    local cfg = self.settings:get_source("zhiqiu")
     local dialog
     dialog = MultiInputDialog:new{
-        title = _("晴天聚合设置"),
+        title = _("知秋四合一设置"),
         fields = {
             {
                 description = _("服务器地址"),
                 text = cfg.server_url or "",
-                hint = "https://v1.gyks.cf/",
+                hint = "https://fq.vv9v.cn",
             },
             {
-                description = _("账号（邮箱）"),
-                text = cfg.username or "",
-                hint = _("邮箱"),
+                description = _("共享Token(可选，填了三件套可自动获取)"),
+                text = cfg.token or "",
+                hint = _("留空自动获取"),
             },
             {
-                description = _("密码"),
-                text = cfg.password or "",
-                hint = _("密码"),
+                description = _("源作者 (pw1)"),
+                text = cfg.source_author or "",
+                hint = _("知秋"),
+            },
+            {
+                description = _("官方反馈群 (pw2)"),
+                text = cfg.group_id or "",
+                hint = "755947375",
+            },
+            {
+                description = _("临时Token口令 (pw3)"),
+                text = cfg.temp_token_pass or "",
+                hint = _("天一团队是倒狗(...)整串"),
             },
         },
         buttons = {
@@ -1111,32 +1248,35 @@ function FanQiePlugin:showQingtianConfigDialog(touchmenu_instance)
                         local fields = dialog:getFields()
                         UIManager:close(dialog)
                         local server = H.trim(fields[1] or "")
-                        local user = H.trim(fields[2] or "")
-                        local pass = (fields[3] or "")
+                        local token  = H.trim(fields[2] or "")
+                        local pw1 = H.trim(fields[3] or "")
+                        local pw2 = H.trim(fields[4] or "")
+                        local pw3 = (fields[5] or "")
                         if server == "" then
                             self:showInfo(_("服务器地址不能为空"))
                             return
                         end
-                        local new_cfg = self.settings:get_source("qingtian")
-                        new_cfg.server_url = server
-                        new_cfg.username = user
-                        new_cfg.password = pass
-                        -- 清除服务器检测缓存
-                        new_cfg._detected_url = nil
-                        new_cfg._detected_at = nil
-                        -- Server/account changed -> clear token to force re-login
-                        if new_cfg.token and new_cfg.token ~= "" then
-                            new_cfg.token = ""
-                            new_cfg.device_id = ""
-                            local SM = require("fanqie.sources")
-                            SM.rate_limit_reset("qingtian")
+                        if token == "" and (pw1 == "" or pw2 == "" or pw3 == "") then
+                            self:showInfo(_("请填共享Token，或填齐 源作者/官方反馈群/临时Token口令 以便自动获取"))
+                            return
                         end
-                        self.settings:set_source("qingtian", new_cfg)
+                        local new_cfg = self.settings:get_source("zhiqiu")
+                        new_cfg.server_url = server
+                        new_cfg.source_author = pw1
+                        new_cfg.group_id = pw2
+                        new_cfg.temp_token_pass = pw3
+                        -- 仅当用户手动填了 token 才覆盖；留空则沿用（由 ensure_token 按3天有效期自动续期）
+                        if token ~= "" then
+                            new_cfg.token = token
+                            new_cfg.token_minted_at = tostring(os.time())
+                        end
+                        self.settings:set_source("zhiqiu", new_cfg)
                         if touchmenu_instance then
                             touchmenu_instance:updateItems()
                         end
                         UIManager:show(InfoMessage:new{
-                            text = _("已保存，下次获取时自动登录"), timeout = 2,
+                            text = _("已保存。若未填Token，请在书源菜单点『立即获取/续期共享Token』"),
+                            timeout = 3,
                         })
                     end,
                 },
@@ -1147,40 +1287,40 @@ function FanQiePlugin:showQingtianConfigDialog(touchmenu_instance)
     dialog:onShowKeyboard()
 end
 
-function FanQiePlugin:showDahuilangConfigDialog(touchmenu_instance)
+function FanQiePlugin:showShuShanConfigDialog(touchmenu_instance)
     if not MultiInputDialog then
         self:showInfo(_("系统不支持多输入对话框"))
         return
     end
-    local cfg = self.settings:get_source("dahuilang")
+    local cfg = self.settings:get_source("shushan")
     local dialog
     dialog = MultiInputDialog:new{
-        title = _("大灰狼聚合设置"),
+        title = _("书山账号设置"),
         fields = {
             {
                 description = _("服务器地址"),
                 text = cfg.server_url or "",
-                hint = "https://legado.gyks.cf/",
+                hint = "https://v2.vossc.com",
             },
             {
-                description = _("邮箱"),
-                text = cfg.username or "",
-                hint = _("账号密码登录（与密钥二选一）"),
+                description = _("书山账号邮箱"),
+                text = cfg.email or "",
+                hint = "xxx@qq.com",
             },
             {
-                description = _("密码"),
+                description = _("书山账号密码"),
                 text = cfg.password or "",
-                hint = _("密码"),
+                hint = _("用于登录获取 api_key"),
             },
             {
-                description = _("密钥 (可选)"),
-                text = cfg.key or "",
-                hint = _("密钥登录（优先于账号密码）"),
+                description = _("真实 Android ID (16/32位hex，读正文必填)"),
+                text = cfg.android_id or "",
+                hint = _("你已用阅读app登录书山的那台安卓设备"),
             },
             {
-                description = _("原始书源"),
-                text = cfg.source or "番茄",
-                hint = _("番茄/七猫/塔读等"),
+                description = _("正文版本号 (默认12)"),
+                text = cfg.content_version or "",
+                hint = "12",
             },
         },
         buttons = {
@@ -1190,80 +1330,50 @@ function FanQiePlugin:showDahuilangConfigDialog(touchmenu_instance)
                     callback = function() UIManager:close(dialog) end,
                 },
                 {
-                    text = _("保存并登录"),
+                    text = _("保存"),
                     is_enter_default = true,
                     callback = function()
                         local fields = dialog:getFields()
                         UIManager:close(dialog)
                         local server = H.trim(fields[1] or "")
-                        local user = H.trim(fields[2] or "")
-                        local pass = H.trim(fields[3] or "")
-                        local key = H.trim(fields[4] or "")
-                        local source = H.trim(fields[5] or "")
-
+                        local email = H.trim(fields[2] or "")
+                        local password = H.trim(fields[3] or "")
+                        local android_id = H.trim(fields[4] or "")
+                        local ver = H.trim(fields[5] or "")
                         if server == "" then
                             self:showInfo(_("服务器地址不能为空"))
                             return
                         end
-
-                        local new_cfg = self.settings:get_source("dahuilang")
-                        local need_relogin = false
-
-                        new_cfg.server_url = server
-                        new_cfg.username = user
-                        new_cfg.password = pass
-                        new_cfg.key = key
-                        new_cfg.source = source ~= "" and source or "番茄"
-                        -- 清除服务器检测缓存
-                        new_cfg._detected_url = nil
-                        new_cfg._detected_at = nil
-
-                        -- If login credentials changed, force re-login
-                        if new_cfg.token and new_cfg.token ~= "" then
-                            local old_token = new_cfg.token
-                            -- Check if credentials changed
-                            if user ~= (cfg.username or "") or pass ~= (cfg.password or "") or key ~= (cfg.key or "") or server ~= (cfg.server_url or "") then
-                                new_cfg.token = ""
-                                new_cfg.device_id = ""
-                                need_relogin = true
-                            end
+                        if email == "" or password == "" then
+                            self:showInfo(_("请填写书山账号邮箱和密码"))
+                            return
                         end
-
-                        self.settings:set_source("dahuilang", new_cfg)
-                        local SM = require("fanqie.sources")
-                        SM.rate_limit_reset("dahuilang")
+                        -- Android ID 合法性提示（非强制，正文时才需要；但给出明显警告）
+                        if android_id ~= "" and not android_id:match("^%x+$") then
+                            self:showInfo(_("Android ID 应为十六进制字符(0-9a-f)。请确认填写的是设备Android ID而非其他编号。"))
+                            return
+                        end
+                        if android_id ~= "" and #android_id ~= 16 and #android_id ~= 32 then
+                            self:showInfo(_("Android ID 长度应为16或32位。你填的是 ") .. tostring(#android_id) .. " 位")
+                            return
+                        end
+                        local new_cfg = self.settings:get_source("shushan")
+                        new_cfg.server_url = server
+                        new_cfg.email = email
+                        new_cfg.password = password
+                        if android_id ~= "" then new_cfg.android_id = android_id end
+                        if ver ~= "" then new_cfg.content_version = ver end
+                        -- 若换了邮箱/密码，旧 api_key 可能失效，清除以触发重新登录
+                        new_cfg.api_key = ""
+                        new_cfg.api_key_at = ""
+                        self.settings:set_source("shushan", new_cfg)
                         if touchmenu_instance then
                             touchmenu_instance:updateItems()
                         end
-
-                        if need_relogin or new_cfg.token == "" then
-                            -- 立即登录（子进程执行 HTTP 登录，不阻塞 UI 线程）
-                            if Client then
-                                self:showBusy(_("正在登录..."))
-                                local settings = self.settings
-                                Async.run(function()
-                                    local c = Client:new(settings)
-                                    c:dahuilang_login()
-                                    return true
-                                end, function(ok_login, _result, err)
-                                    self:closeBusy()
-                                    if ok_login then
-                                        UIManager:show(InfoMessage:new{
-                                            text = _("大灰狼登录成功！"), timeout = 2,
-                                        })
-                                    else
-                                        UIManager:show(InfoMessage:new{
-                                            text = _("登录失败: ") .. tostring(err), timeout = 3,
-                                        })
-                                    end
-                                    if touchmenu_instance then touchmenu_instance:updateItems() end
-                                end, { delay = 0.1, poll_interval = 0.2, timeout = 30 })
-                            end
-                        else
-                            UIManager:show(InfoMessage:new{
-                                text = _("大灰狼配置已保存"), timeout = 2,
-                            })
-                        end
+                        UIManager:show(InfoMessage:new{
+                            text = _("已保存。请点『登录测试』获取 api_key 后即可使用。读正文还需有效 Android ID。"),
+                            timeout = 4,
+                        })
                     end,
                 },
             },
@@ -1334,136 +1444,6 @@ function FanQiePlugin:showSourceRateLimitDialog(source_id, touchmenu_instance)
     }
     UIManager:show(dialog)
     dialog:onShowKeyboard()
-end
-
-function FanQiePlugin:showServerDetectionDialog(source_id, touchmenu_instance)
-    local cfg = self.settings:get_source(source_id)
-    local servers = cfg.servers or {}
-    local source_name = source_id == "dahuilang" and _("大灰狼") or _("晴天")
-    
-    if #servers == 0 then
-        self:showInfo(source_name .. _("服务器列表为空，请先在配置中添加服务器地址"))
-        return
-    end
-
-    -- 持久 busy：检测期间 UI 保持响应（之前 InfoMessage timeout=1 会消失且 scheduleIn 仍阻塞 UI 线程）
-    self:showBusy(source_name .. _("正在检测服务器..."))
-
-    -- 检测放到子进程：每条线路最多 10s 超时，N 条线路顺序探测原本会阻塞 UI 线程 N×10s
-    local client = self.client
-    local servers_copy = servers  -- 闭包捕获，子进程 fork 继承
-    Async.run(function()
-        local results = {}
-        local available_count = 0
-        for _, url in ipairs(servers_copy) do
-            local ok, available, code = pcall(function()
-                return client:check_single_server(url)
-            end)
-            if ok and available then
-                table.insert(results, { url = url, available = true, code = code })
-                available_count = available_count + 1
-            else
-                table.insert(results, { url = url, available = false, code = code or 0 })
-            end
-        end
-        return { results = results, available_count = available_count, total = #servers_copy }
-    end, function(ok, result, err)
-        self:closeBusy()
-        if not ok or type(result) ~= "table" then
-            self:showError(T(_("检测失败:\n%1"), display_error(err or result)))
-            return
-        end
-
-        local results = result.results or {}
-        local available_count = result.available_count or 0
-        local total = result.total or #servers
-
-        -- Build result text
-        local result_lines = {}
-        table.insert(result_lines, string.format(_("检测完成: %d/%d 可用"), available_count, total))
-        table.insert(result_lines, "")
-
-        for i, r in ipairs(results) do
-            local status = r.available and "✓" or "✗"
-            local short_url = r.url:gsub("^https?://", "")
-            table.insert(result_lines, string.format("%s %s [%s]", status, short_url, r.available and _("可用") or _("不可用")))
-        end
-
-        local result_text = table.concat(result_lines, "\n")
-
-        -- Show results with selection
-        local MultiInputDialog = require("ui/widget/multiinputdialog")
-        if not MultiInputDialog then
-            -- Simple info dialog
-            self:showInfo(result_text)
-            return
-        end
-
-        local dialog
-        dialog = MultiInputDialog:new{
-            title = source_name .. _("线路检测结果"),
-            fields = {
-                {
-                    description = _("检测结果"),
-                    text = result_text,
-                    readonly = true,
-                    text_type = "multi-line",
-                },
-                {
-                    description = _("选择可用服务器 (输入序号)"),
-                    text = available_count > 0 and "1" or "",
-                    hint = _("填入要使用的服务器序号 (1, 2, 3...)"),
-                },
-            },
-            buttons = {
-                {
-                    {
-                        text = _("关闭"),
-                        callback = function() UIManager:close(dialog) end,
-                    },
-                    {
-                        text = _("使用选中线路"),
-                        is_enter_default = true,
-                        enabled_func = function() return available_count > 0 end,
-                        callback = function()
-                            local fields = dialog:getFields()
-                            UIManager:close(dialog)
-                            local idx = tonumber(H.trim(fields[2] or ""))
-                            if idx and idx >= 1 and idx <= #results and results[idx].available then
-                                local new_cfg = self.settings:get_source(source_id)
-                                new_cfg.server_url = results[idx].url
-                                -- Clear token since server changed
-                                new_cfg.token = ""
-                                new_cfg.device_id = ""
-                                -- Clear cached detection
-                                new_cfg._detected_url = nil
-                                new_cfg._detected_at = nil
-                                self.settings:set_source(source_id, new_cfg)
-                                self.settings:flush()
-                                local SM = require("fanqie.sources")
-                                SM.rate_limit_reset(source_id)
-                                if touchmenu_instance then
-                                    touchmenu_instance:updateItems()
-                                end
-                                local short = results[idx].url:gsub("^https?://", "")
-                                UIManager:show(InfoMessage:new{
-                                    text = string.format(_("已切换到: %s"), short),
-                                    timeout = 2,
-                                })
-                            else
-                                UIManager:show(InfoMessage:new{
-                                    text = _("无效的序号或该线路不可用"),
-                                    timeout = 2,
-                                })
-                            end
-                        end,
-                    },
-                },
-            },
-        }
-        UIManager:show(dialog)
-        dialog:onShowKeyboard()
-    end, { poll_interval = 0.3, timeout = 120 })
 end
 
 function FanQiePlugin:getLogMenuItems()
@@ -3035,9 +3015,9 @@ function FanQiePlugin:onShowFanQieToc()
 end
 
 function FanQiePlugin:onShowFanQieBookshelf()
-    if not (self.ui and self.ui.document) then
-        self:showBookshelf()
-    end
+    -- 手势「番茄书架」：任何上下文（FileManager / Reader）都直接打开书架。
+    -- 书架 widget 压栈显示，底层阅读器仍在，选择书目后自行导航，不会破坏进度。
+    self:showBookshelf()
     return true
 end
 

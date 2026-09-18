@@ -45,54 +45,47 @@ local defaults = {
     para_review_enabled = false,
     download_dir = "",
     config_loaded = true,
-    -- Legacy qingtian config (kept for migration; new code reads sources.qingtian)
-    qingtian = {
-        server_url = "https://v1.gyks.cf/",
-        username = "",
-        password = "",
-        token = "",
-        device_id = "",
-        auto_login = true,
-        rate_limit = {
-            max_requests = 5,
-            window_seconds = 30,
-        },
-    },
-    -- Book source management (replaces hardcoded qingtian->official fallback)
+    -- Book source management
     sources = {
-        qingtian = {
-            enabled = true,
-            order = 2,
-            server_url = "https://v1.gyks.cf/",
-            username = "",
-            password = "",
-            token = "",
-            device_id = "",
-            auto_login = true,
-            rate_limit = { max_requests = 5, window_seconds = 30 },
-        },
-        dahuilang = {
-            enabled = true,
-            order = 1,
-            server_url = "https://v2.czyl.cf",
-            username = "",
-            password = "",
-            key = "",
-            token = "",
-            device_id = "",
-            auto_login = true,
-            source = "番茄",
-            tab = "小说",
-            tone_id = "4",
-            rate_limit = { max_requests = 5, window_seconds = 30 },
-        },
         official = {
             enabled = true,
             order = 3,
             rate_limit = { max_requests = 0, window_seconds = 0 },
         },
+        zhiqiu = {
+            enabled = true,
+            order = 4,
+            server_url = "https://fq.vv9v.cn",
+            token = "",          -- x-sec-token 共享Token（可留空，由三件套自动获取）
+            token_minted_at = "",-- unix time when token was minted (~3天有效期)
+            android_id = "",     -- 固定16位hex设备id（与铸币/取数一致）
+            tone_id = "",
+            -- 知秋三件套（用于自动获取/续期共享Token）
+            source_author = "",   -- 源作者    = 知秋
+            group_id = "",        -- 官方反馈群 = 755947375
+            temp_token_pass = "", -- 临时Token口令（天一团队是倒狗...整串）
+            rate_limit = { max_requests = 300, window_seconds = 60 },
+        },
+        shushan = {
+            -- 书山聚合（聚合非番茄源 + 番茄付费解锁）。默认禁用：需要用户已用
+            -- 阅读 app 登录书山并获得该台设备的真实 Android ID 才能读正文，且
+            -- 伪造设备码会触发软拦截/曾致封号，故必须显式启用并手动填写。
+            enabled = false,
+            order = 5,
+            server_url = "https://v2.vossc.com",
+            email = "",          -- 书山账号邮箱
+            password = "",       -- 书山账号密码
+            api_key = "",        -- 登录成功后的 api_key（16字符，可复用，无需每次登录）
+            api_key_at = "",     -- unix time when api_key was obtained
+            android_id = "",     -- 真实 16hex Android ID（必填才能读正文，插件不自动生成）
+            device_type = "android", -- android | ios
+            source = "番茄小说",  -- 默认聚合搜索源
+            tab = "novel",
+            content_version = "12",
+            rate_limit = { max_requests = 10, window_seconds = 30 },
+        },
     },
-    sources_version = 1,
+    sources_version = 3,
 }
 
 local function deepcopy(value)
@@ -107,72 +100,21 @@ local function deepcopy(value)
     return out
 end
 
--- One-time migration: merge legacy `qingtian` settings into `sources.qingtian`.
--- Only runs when sources_version < 1. Overwrites default empty values with the
--- user's actual legacy config (so real account/password/token are carried over).
-local function migrate_legacy_qingtian(store)
-    local legacy = store:readSetting("qingtian", nil)
-    if legacy and type(legacy) == "table" then
-        local sources = store:readSetting("sources", deepcopy(defaults.sources))
-        local qt = sources.qingtian or {}
-        -- Carry over non-empty legacy values (overwrite default empty strings)
-        for _, key in ipairs({"server_url", "username", "password", "token", "device_id"}) do
-            if legacy[key] ~= nil and legacy[key] ~= "" then
-                qt[key] = legacy[key]
-            end
+-- Migration v3: ensure sources.shushan exists with defaults (merge, never
+-- overwrite existing user config). ShuShan is disabled by default — the user
+-- must explicitly enable it and supply their real account + Android ID.
+local function migrate_add_shushan(store)
+    local sources = store:readSetting("sources", deepcopy(defaults.sources))
+    local ss = sources.shushan or {}
+    local def = defaults.sources.shushan or {}
+    for k, v in pairs(def) do
+        if ss[k] == nil then
+            ss[k] = deepcopy(v)
         end
-        -- auto_login is a boolean, preserve legacy setting
-        if legacy.auto_login ~= nil then
-            qt.auto_login = legacy.auto_login
-        end
-        if type(legacy.rate_limit) == "table" then
-            qt.rate_limit = qt.rate_limit or {}
-            if legacy.rate_limit.max_requests ~= nil then
-                qt.rate_limit.max_requests = legacy.rate_limit.max_requests
-            end
-            if legacy.rate_limit.window_seconds ~= nil then
-                qt.rate_limit.window_seconds = legacy.rate_limit.window_seconds
-            end
-        end
-        sources.qingtian = qt
-        store:saveSetting("sources", sources)
     end
-    store:saveSetting("sources_version", 1)
-    store:flush()
-end
-
-local function migrate_legacy_dahuilang(store)
-    local legacy = store:readSetting("dahuilang", nil)
-    if legacy and type(legacy) == "table" then
-        local sources = store:readSetting("sources", deepcopy(defaults.sources))
-        local dl = sources.dahuilang or {}
-        for _, key in ipairs({"server_url", "username", "password", "key", "token", "device_id", "source", "tab", "tone_id"}) do
-            if legacy[key] ~= nil and legacy[key] ~= "" then
-                dl[key] = legacy[key]
-            end
-        end
-        if legacy.auto_login ~= nil then
-            dl.auto_login = legacy.auto_login
-        end
-        if legacy.enabled ~= nil then
-            dl.enabled = legacy.enabled
-        end
-        if legacy.order ~= nil then
-            dl.order = legacy.order
-        end
-        if type(legacy.rate_limit) == "table" then
-            dl.rate_limit = dl.rate_limit or {}
-            if legacy.rate_limit.max_requests ~= nil then
-                dl.rate_limit.max_requests = legacy.rate_limit.max_requests
-            end
-            if legacy.rate_limit.window_seconds ~= nil then
-                dl.rate_limit.window_seconds = legacy.rate_limit.window_seconds
-            end
-        end
-        sources.dahuilang = dl
-        store:saveSetting("sources", sources)
-    end
-    store:saveSetting("sources_version", 2)
+    sources.shushan = ss
+    store:saveSetting("sources", sources)
+    store:saveSetting("sources_version", 3)
     store:flush()
 end
 
@@ -192,15 +134,10 @@ function Settings:new()
         obj.store:flush()
     end
 
-    -- Migrate legacy qingtian config into sources.qingtian (once)
+    -- Migration v3: ensure sources.shushan default block exists (once)
     local sv = obj.store:readSetting("sources_version", 0) or 0
-    if sv < 1 then
-        migrate_legacy_qingtian(obj.store)
-    end
-    -- Migrate legacy dahuilang config into sources.dahuilang (once)
-    sv = obj.store:readSetting("sources_version", 0) or 0
-    if sv < 2 then
-        migrate_legacy_dahuilang(obj.store)
+    if sv < 3 then
+        migrate_add_shushan(obj.store)
     end
 
     local download_dir = obj.store:readSetting("download_dir", "")
@@ -268,9 +205,7 @@ function Settings:is_cookie_configured()
 end
 
 -- === Book source management ===
--- These accessors read/write `sources.<id>` (the new unified config).
--- Legacy get_qingtian_* APIs are kept for backward compatibility; they
--- now delegate to sources.qingtian.
+-- These accessors read/write `sources.<id>` (the unified config).
 
 function Settings:get_sources()
     return self:get("sources", {})
@@ -324,56 +259,6 @@ function Settings:move_source(source_id, direction)
         return true
     end
     return false
-end
-
-function Settings:get_qingtian_configured()
-    local qt = self:get_source("qingtian")
-    local server_url = H.trim(qt.server_url or "")
-    local username = H.trim(qt.username or "")
-    local token = H.trim(qt.token or "")
-    return server_url ~= "" and (token ~= "" or username ~= "")
-end
-
-function Settings:get_qingtian_token()
-    local qt = self:get_source("qingtian")
-    return H.trim(qt.token or "")
-end
-
-function Settings:set_qingtian_token(token, device_id)
-    local qt = self:get_source("qingtian")
-    qt.token = token
-    if device_id then
-        qt.device_id = device_id
-    end
-    self:set_source("qingtian", qt)
-end
-
-function Settings:clear_qingtian_token()
-    local qt = self:get_source("qingtian")
-    qt.token = ""
-    qt.device_id = ""
-    self:set_source("qingtian", qt)
-end
-
-function Settings:get_dahuilang_token()
-    local dl = self:get_source("dahuilang")
-    return H.trim(dl.token or "")
-end
-
-function Settings:set_dahuilang_token(token, device_id)
-    local dl = self:get_source("dahuilang")
-    dl.token = token
-    if device_id then
-        dl.device_id = device_id
-    end
-    self:set_source("dahuilang", dl)
-end
-
-function Settings:clear_dahuilang_token()
-    local dl = self:get_source("dahuilang")
-    dl.token = ""
-    dl.device_id = ""
-    self:set_source("dahuilang", dl)
 end
 
 -- Compute a simple hash of the config table for change detection.
@@ -551,57 +436,6 @@ function Settings:apply_config(config, options)
             end
             sources[source_id] = existing
         end
-        self:set("sources", sources)
-    end
-
-    -- Legacy qingtian config: merge into sources.qingtian (nil-only)
-    if H.is_tbl(config.qingtian) then
-        local sources = self:get("sources")
-        local qt = sources.qingtian or {}
-        for key, value in pairs(config.qingtian) do
-            if key ~= "token" and key ~= "device_id" then
-                if qt[key] == nil or force then
-                    qt[key] = value
-                end
-            end
-        end
-        if config.qingtian.auto_login ~= nil then
-            if qt.auto_login == nil or force then
-                qt.auto_login = config.qingtian.auto_login
-            end
-        end
-        sources.qingtian = qt
-        self:set("sources", sources)
-    end
-
-    -- Legacy dahuilang config: merge into sources.dahuilang (nil-only)
-    if H.is_tbl(config.dahuilang) then
-        local sources = self:get("sources")
-        local dl = sources.dahuilang or {}
-        for key, value in pairs(config.dahuilang) do
-            -- Protect token/device_id from being overwritten by config file
-            if key ~= "token" and key ~= "device_id" then
-                if dl[key] == nil or force then
-                    dl[key] = value
-                end
-            end
-        end
-        if config.dahuilang.auto_login ~= nil then
-            if dl.auto_login == nil or force then
-                dl.auto_login = config.dahuilang.auto_login
-            end
-        end
-        if config.dahuilang.enabled ~= nil then
-            if dl.enabled == nil or force then
-                dl.enabled = config.dahuilang.enabled
-            end
-        end
-        if config.dahuilang.order ~= nil then
-            if dl.order == nil or force then
-                dl.order = config.dahuilang.order
-            end
-        end
-        sources.dahuilang = dl
         self:set("sources", sources)
     end
 

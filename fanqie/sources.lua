@@ -1,7 +1,6 @@
 -- FanQie Plugin Source Manager
 -- Central registry + rate limiter + active-source resolution for book sources.
--- Replaces the hardcoded "qingtian -> official" fallback with a generic
--- scheduler that iterates user-configured sources in priority order.
+-- A generic scheduler that iterates user-configured sources in priority order.
 --
 -- Usage:
 --   local SM = require("fanqie.sources")
@@ -15,17 +14,17 @@ local SourceManager = {}
 -- Static registry: source_id -> metadata (no user config here).
 -- Used for menu display, configuration checks and fetcher dispatch.
 SourceManager.REGISTRY = {
-    qingtian = {
-        name = "晴天聚合",
-        configurable = true,        -- has editable server/account fields
-    },
-    dahuilang = {
-        name = "大灰狼",
-        configurable = true,       -- has editable server URL + token
-    },
     official = {
         name = "官方API（解码）",
         configurable = false,
+    },
+    zhiqiu = {
+        name = "知秋四合一",
+        configurable = true,       -- has editable server URL + shared token
+    },
+    shushan = {
+        name = "书山聚合",
+        configurable = true,       -- has editable email/password + android id
     },
 }
 
@@ -120,20 +119,27 @@ end
 -- Check whether a source is configured (skipped if not).
 function SourceManager.is_configured(source_id, cfg, settings)
     cfg = cfg or {}
-    if source_id == "qingtian" then
-        local server = trim(cfg.server_url)
-        local token  = trim(cfg.token)
-        local user   = trim(cfg.username)
-        return server ~= "" and (token ~= "" or user ~= "")
-    elseif source_id == "dahuilang" then
-        local server = trim(cfg.server_url)
-        local token  = trim(cfg.token)
-        local user   = trim(cfg.username)
-        local key    = trim(cfg.key)
-        return server ~= "" and (token ~= "" or key ~= "" or user ~= "")
-    elseif source_id == "official" then
+    if source_id == "official" then
         -- Official chapter_content_url is public; always available as fallback.
         return true
+    elseif source_id == "zhiqiu" then
+        -- 知秋四合一: usable if a stored token exists, OR the 源作者/官方反馈群/
+        -- 临时Token口令 三件套 is present (module can self-mint/refresh the token).
+        local token = trim(cfg.token)
+        if token ~= "" then return true end
+        local pw1 = trim(cfg.source_author)
+        local pw2 = trim(cfg.group_id)
+        local pw3 = trim(cfg.temp_token_pass)
+        return pw1 ~= "" and pw2 ~= "" and pw3 ~= ""
+    elseif source_id == "shushan" then
+        -- 书山聚合: usable if a stored api_key exists, OR email+password present
+        -- (module can login on demand). Android id is NOT required to be "usable"
+        -- for catalog/search; only for content (checked at fetch time).
+        local key = trim(cfg.api_key)
+        if key ~= "" then return true end
+        local email = trim(cfg.email)
+        local password = trim(cfg.password)
+        return email ~= "" and password ~= ""
     end
     return false
 end

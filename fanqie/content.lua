@@ -530,7 +530,7 @@ function Content.clean_chapter_content(raw_content, title)
 
     local content = raw_content
 
-    -- 移除不可见字符（零宽空格、BOM、软连字符、双向控制符等，晴天/大灰狼广告中大量掺杂）
+    -- 移除不可见字符（零宽空格、BOM、软连字符、双向控制符等，聚合源广告中大量掺杂）
     -- U+200B-200F, U+2028-202E, U+FEFF, U+00AD
     content = content:gsub("\226\128[\139\140\141\142\143]", "")  -- U+200B-200F 零宽空格/方向标记
     content = content:gsub("\226\128[\168\169\170\171\172\173\174]", "")  -- U+2028-202E 行/段分隔符与双向控制符
@@ -549,7 +549,7 @@ function Content.clean_chapter_content(raw_content, title)
         content = body_match
     end
 
-    -- 移除末尾广告：晴天广告以 📣 开头，大灰狼以 "本书源" 开头
+    -- 移除末尾广告：部分聚合源广告以 📣 或 "本书源" 开头
     -- 广告可能跨多行，从起始标志到内容结尾全部删除
     -- 📣 = U+1F4E3 = F0 9F 93 A3
     local ad_start = nil
@@ -586,7 +586,7 @@ function Content.clean_chapter_content(raw_content, title)
         -- 不支持 JavaScript onclick 事件，但支持 <a> 链接点击 → 触发 onGotoLink 事件
         -- href 中的 N 是段评在 para_reviews 表中的序号，插件通过 onGotoLink 拦截
         comment_bubbles[idx] = string.format(
-            '<a class="para-comment" href="fanqie-para:%d">%d</a>',
+            '<a class="para-comment" href="fanqie-para:%d">[%d]</a>',
             idx, n
         )
         return "\001CMT" .. idx .. "\001"
@@ -599,7 +599,7 @@ function Content.clean_chapter_content(raw_content, title)
             table.insert(comment_samples, string.format('<comment ident="%s" />', ident:sub(1, 80)))
         end
         comment_bubbles[idx] = string.format(
-            '<a class="para-comment" href="fanqie-para:%d">0</a>',
+            '<a class="para-comment" href="fanqie-para:%d">[0]</a>',
             idx
         )
         return "\001CMT" .. idx .. "\001"
@@ -768,7 +768,7 @@ function Content.clean_chapter_content(raw_content, title)
             if is_img_only then
                 table.insert(paragraphs, para_content .. ph_html)
             else
-                table.insert(paragraphs, "<p>" .. para_content .. "</p>" .. ph_html)
+                            table.insert(paragraphs, "<p>" .. para_content .. "</p>" .. ph_html)
             end
         elseif ph_html ~= "" then
             table.insert(paragraphs, "<p>" .. ph_html .. "</p>")
@@ -1303,6 +1303,17 @@ function Content.save_chapter_html(settings, book, chapter, xhtml, assets, css)
     local path = dir .. "/" .. "chapter_" .. item_id .. ".html"
     local title = chapter.title or book.title or "FanQie"
 
+    -- 章节号与标题名分两行：把"第X章/卷/节/回/部/篇"前缀拆出，插 <br/>
+    -- 不匹配（序章/后记/无"第X章"格式）则原样返回，不影响其他标题
+    local function split_title_for_display(raw_title)
+        local t = tostring(raw_title or "")
+        local num, rest = t:match("^(第[一二三四五六七八九十百千零〇%d]+[章卷节回部篇])%s*(.+)$")
+        if num and rest and rest ~= "" then
+            return '<span class="chap-num">' .. xml_escape(num) .. "</span><br/>" .. xml_escape(rest)
+        end
+        return xml_escape(t)
+    end
+
     -- 1. Write downloaded image assets to actual files on disk (relative-path fallback for crengine)
     --    href in assets is "images/img_001.png"; relative to dir this resolves correctly.
     local href_to_rel = {}
@@ -1417,7 +1428,7 @@ function Content.save_chapter_html(settings, book, chapter, xhtml, assets, css)
 </style>
 </head>
 <body>
-<h1>]] .. xml_escape(title) .. [[</h1>
+<h1>]] .. split_title_for_display(title) .. [[</h1>
 ]] .. body .. [[
 </body>
 </html>]]
@@ -1438,7 +1449,7 @@ function Content.fetch_chapter_html(client, settings, book, chapter, opts)
         error("fetch_chapter_content failed: " .. tostring(xhtml))
     end
 
-    -- 段评气泡 CSS（简洁上标数字，墨水屏黑白兼容，无动画无倾斜）
+    -- 段评标记 CSS（[数字] 方括号形式，墨水屏黑白兼容，纯文本可靠渲染）
     local css = [[
 body { font-size: 1em; }
 p{
@@ -1453,13 +1464,16 @@ img {
   height: auto;
 }
 
-/* 段评数字：上标小号数字，点击触发 onGotoLink */
+/* 段评标记：[数字] 方括号形式，点击触发 onGotoLink
+   纯文本字符实现，任何 crengine 版本都可靠渲染（不依赖圆角/背景） */
 a.para-comment {
-  font-size: 0.5em !important;
-  vertical-align: super;
+  font-size: 0.8em !important;
   text-decoration: none;
-  margin-left: 2px;
+  font-weight: bold;
+  margin-left: 1px;
+  margin-right: 1px;
 }
+
 ]]
     local assets = {}
     local cache = settings:get("cache", {})

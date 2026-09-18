@@ -131,6 +131,29 @@ function Async.run(work_func, on_done, opts)
 
     -- 子进程入口：执行 work_func，把结果以 JSON 写回管道并关闭 fd。
     local function child_entry(pid, child_write_fd)
+        -- fork 后的子进程会继承父进程的 fd（含 HTTP Inspector 的监听 socket，
+        -- 如 8082）。若不关闭，子进程存活期间会占住该端口，导致父进程在
+        -- standby/resume、章节切换时无法重新 bind，报 "address already in use"。
+        -- 番茄 async 子进程只需 stdio + child_write_fd 通信，其余继承 fd 一律关闭。
+        pcall(function()
+            local ffi_c, C_c
+            local ok_ffi_c, ffi_c_mod = pcall(require, "ffi")
+            if ok_ffi_c and ffi_c_mod then
+                ffi_c = ffi_c_mod
+                C_c = ffi_c.C
+            end
+            if C_c and C_c.close then
+                local keep = { [0] = true, [1] = true, [2] = true }
+                if child_write_fd then keep[child_write_fd] = true end
+                -- 遍历 3..最大可能 fd；对未打开 fd 的 close 是安全的 no-op (EBADF)。
+                local MAX_FD = 1024
+                for fd = 3, MAX_FD do
+                    if not keep[fd] then
+                        pcall(C_c.close, fd)
+                    end
+                end
+            end
+        end)
         local ok, result = pcall(work_func)
         local payload
         if ok then
