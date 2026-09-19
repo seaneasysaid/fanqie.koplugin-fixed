@@ -169,7 +169,7 @@ function ThoughtPopupWidget:_buildLayout()
     local chrome = TOP_BORDER_SIZE + PADDING_TOP + PADDING_BOTTOM
 
     -- 「继续加载」按钮：先建好并量高度，把占的纵向空间一起计进 chrome，
-    -- 否则视口会把按钮挤出屏幕（对齐 Leko Reader 的底部按钮做法）
+    -- 否则视口会把按钮挤出屏幕
     local more_btn
     if self.more_text and self.on_more then
         local Button = require("ui/widget/button")

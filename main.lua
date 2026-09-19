@@ -691,7 +691,7 @@ function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result,
 
         -- ================================================================
         -- 书山段评懒加载：首屏只展示已拉到的 1 页（20 条），
-        -- 底部「继续加载（还剩 N 条）」按钮续拉下一页（参考 Leko Reader）。
+        -- 底部「继续加载（还剩 N 条）」按钮续拉下一页。
         -- ================================================================
         _para_more_state = {
             ident = tostring(ident),
@@ -719,7 +719,7 @@ function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result,
                 if dir == "prev" then navigate_para(-1)
                 else navigate_para(1) end
             end
-            -- 对齐 Leko：还有余量就一定有按钮；总数已知 →「还剩 N 条」，
+            -- 还有余量就一定有按钮；总数已知 →「还剩 N 条」，
             -- 总数未知（气泡 count 缺失）→「继续加载更多评论」
             -- WARN 级落盘：不开 developer_logs 也能诊断按钮为何不出现
             if Log then
