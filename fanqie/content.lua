@@ -585,9 +585,12 @@ function Content.clean_chapter_content(raw_content, title)
         -- 用 <a href="fanqie-para:N"> 代替 <span onclick>，因为 KOReader 的 crengine
         -- 不支持 JavaScript onclick 事件，但支持 <a> 链接点击 → 触发 onGotoLink 事件
         -- href 中的 N 是段评在 para_reviews 表中的序号，插件通过 onGotoLink 拦截
+        -- 超过 99 条显示 99+，避免四位数字气泡过宽
+        local n_label = tostring(n)
+        if n > 99 then n_label = "99+" end
         comment_bubbles[idx] = string.format(
-            '<a class="para-comment" href="fanqie-para:%d">[%d]</a>',
-            idx, n
+            '<a class="para-comment" href="fanqie-para:%d">[%s]</a>',
+            idx, n_label
         )
         return "\001CMT" .. idx .. "\001"
     end)

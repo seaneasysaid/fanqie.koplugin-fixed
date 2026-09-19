@@ -650,13 +650,13 @@ end
 -- GET {base}/idea_comment?api=1&book_id=&item_id=&para=&cursor=&count=&sort=
 --   → { code:0, data:{ data_list:[{comment:{common,stat}}], para_src_content } }
 -- 与番茄原生/知秋同构，main.lua 的 _displayParaReviewDetail 可直接解析。
-function Client:shushan_get_para_review(ident)
+function Client:shushan_get_para_review(ident, opts)
     local bid, cid, pid = tostring(ident):match("^shushan:([^:]+):([^:]+):([^:]+)$")
     if not bid then
         error("书山段评 ident 无效: " .. tostring(ident):sub(1, 80))
     end
     local ShuShan = require("fanqie.shushan")
-    return ShuShan.get_para_review(self, self.settings, bid, cid, pid)
+    return ShuShan.get_para_review(self, self.settings, bid, cid, pid, opts)
 end
 
 -- 知秋段评内容拉取。ident 格式: "zhiqiu:<book_id>:<item_id>:<pid>"

@@ -45,6 +45,15 @@ end
 ---                    doc_margins, height_ratio, dialog, close_callback }
 function M.show(opts)
     opts = opts or {}
+    do
+        local ok_log, FLog = pcall(require, "fanqie.logger")
+        if ok_log and FLog and FLog.warn then
+            FLog.warn("[段评] show入口: more_text=" .. tostring(opts.more_text)
+                .. " on_more=" .. tostring(opts.on_more ~= nil)
+                .. " position=" .. tostring(opts.position)
+                .. " pooled=" .. tostring(_pool[normalizePosition(opts.position)] ~= nil))
+        end
+    end
     if type(opts.pages) ~= "table" or #opts.pages == 0 then
         error("thought popup: invalid pages")
     end
@@ -90,6 +99,8 @@ function M.show(opts)
         dialog = opts.dialog,
         close_callback = opts.close_callback,
         para_nav = opts.para_nav,
+        more_text = opts.more_text,
+        on_more = opts.on_more,
     }
     _pool[position] = popup
     UIManager:show(popup)

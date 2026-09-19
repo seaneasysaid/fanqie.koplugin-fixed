@@ -644,7 +644,9 @@ function ShuShan.get_para_review(client, settings, book_id, item_id, para_id, op
     local dev_type = ShuShan.resolve_device_type(cfg)
 
     local COUNT    = tonumber(opts.count) or 20
-    local PAGE_MAX = tonumber(opts.page_max) or 5   -- 最多 5 页(≈100条)，防超时/异常
+    -- 懒加载：默认一次只拉 1 页（20 条），首屏 1 次 RTT 即出内容；
+    -- 剩余条数由调用方带 opts.cursor 续拉。page_max 供调用方显式放宽。
+    local PAGE_MAX = tonumber(opts.page_max) or 1
     local sort     = tostring(opts.sort or "1")     -- 1=默认/最热, 0=最新
 
     local headers = {
@@ -656,7 +658,8 @@ function ShuShan.get_para_review(client, settings, book_id, item_id, para_id, op
 
     local merged = {}
     local para_src = ""
-    local cursor = "0"
+    local cursor = tostring(opts.cursor or "0")
+    local last_total, last_has_more, last_page_full = nil, nil, false
     local page = 0
     while page < PAGE_MAX do
         page = page + 1
@@ -685,8 +688,13 @@ function ShuShan.get_para_review(client, settings, book_id, item_id, para_id, op
         local list = data.data_list
         if type(list) ~= "table" or #list == 0 then break end
         for _, item in ipairs(list) do merged[#merged + 1] = item end
-        if #list < COUNT then break end        -- 本页不足一页 → 到底
+        last_page_full = (#list >= COUNT)
         local clinfo = data.common_list_info
+        if type(clinfo) == "table" then
+            last_total = tonumber(clinfo.total) or last_total
+            last_has_more = clinfo.has_more
+        end
+        if #list < COUNT then break end        -- 本页不足一页 → 到底
         if type(clinfo) == "table" and clinfo.cursor ~= nil then
             cursor = tostring(clinfo.cursor)   -- 服务端给了游标则优先采用
             if clinfo.has_more == false then break end
@@ -715,12 +723,24 @@ function ShuShan.get_para_review(client, settings, book_id, item_id, para_id, op
             "para=" .. tostring(para_id), "条数=" .. tostring(#merged))
     end
 
+    -- has_more 判定：服务端明确给值优先；否则按「本页是否拉满一页」推断
+    local has_more_out = false
+    if last_has_more ~= nil then
+        has_more_out = (last_has_more == true)
+    else
+        has_more_out = last_page_full
+    end
+
     return {
         code = 0,
         data = {
             data_list = merged,
             para_src_content = para_src,
-            common_list_info = { total = #merged, has_more = false },
+            common_list_info = {
+                total = last_total or #merged,
+                has_more = has_more_out,
+                cursor = tonumber(cursor) or 0,
+            },
         },
     }
 end

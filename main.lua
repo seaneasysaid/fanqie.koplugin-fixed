@@ -411,6 +411,9 @@ function FanQiePlugin:showParaReviewDetail(index)
     local book_id = _state.current_book and _state.current_book.book_id or ""
     local review_index = index
     local total_reviews = #reviews
+    -- 气泡上的 count = 服务端该段评论总数（章节缓存 index 提供）。
+    -- 书山 /idea_comment 响应无 common_list_info，总数只能以此为权威来源。
+    local bubble_count = tonumber(pr.count) or 0
 
     -- 将段评获取（阻塞 HTTP）移到子进程，UI 线程仅轮询，不阻塞用户操作。
     -- 子进程不可用时 Async.run 内部自动降级为延后同步。
@@ -434,7 +437,7 @@ function FanQiePlugin:showParaReviewDetail(index)
                 -- 书山自有段落级段评 JSON 通道（GET /idea_comment?api=1，2026-09-13 实测可用），
                 -- 不再依赖知秋。ident 格式 shushan:<bid>:<cid>:<pid>，返回番茄原生结构，
                 -- 与 _displayParaReviewDetail 解析器兼容。
-                ok, result = pcall(function() return c:shushan_get_para_review(ident) end)
+                ok, result = pcall(function() return c:shushan_get_para_review(ident, { page_max = 2 }) end)
                 if not ok then
                     error("书山段评获取失败：" .. tostring(result or "")
                         .. "（请确认书山账号已登录、Android ID 为真实设备）")
@@ -448,7 +451,7 @@ function FanQiePlugin:showParaReviewDetail(index)
             if not ok then error(result or "段评获取失败") end
             return result
         end, function(ok, result, err)
-            self_ref:_displayParaReviewDetail(review_index, total_reviews, ok, result, err)
+            self_ref:_displayParaReviewDetail(review_index, total_reviews, ok, result, err, bubble_count)
         end, { poll_interval = 0.125, timeout = 60 })
     else
         -- 降级：Async 模块未加载（极端情况），同步执行
@@ -459,7 +462,7 @@ function FanQiePlugin:showParaReviewDetail(index)
         local ok, result
         if is_shushan then
             -- 书山自有段评通道（不依赖知秋）
-            ok, result = pcall(function() return c:shushan_get_para_review(ident) end)
+            ok, result = pcall(function() return c:shushan_get_para_review(ident, { page_max = 2 }) end)
             if not ok then
                 error("书山段评获取失败：" .. tostring(result or "")
                     .. "（请确认书山账号已登录、Android ID 为真实设备）")
@@ -470,13 +473,97 @@ function FanQiePlugin:showParaReviewDetail(index)
             -- 无法识别的 ident（多为旧缓存中已移除书源的历史段评）
             ok, result = false, "无法识别段评来源: " .. ident_str:sub(1, 60)
         end
-        self_ref:_displayParaReviewDetail(review_index, total_reviews, ok, result, nil)
+        self_ref:_displayParaReviewDetail(review_index, total_reviews, ok, result, nil, bubble_count)
     end
 end
 
+-- 书山段评懒加载状态（同一时间只有一个段评弹窗）：
+-- { ident, index, total_reviews, rich_items, total, cursor, has_more, busy, ui_opts }
+local _para_more_state = nil
+
+-- 解析段评返回（支持新格式 data_list 与旧格式 comments），并提取书山分页信息
+-- （common_list_info 的 total / has_more / cursor）
+local function _parseParaReviewResult(result)
+    local comments = nil
+    local total = 0
+    local cursor, has_more = nil, nil
+    if type(result) == "table" and type(result.data) == "table" then
+        -- 新格式: data.data_list[].comment.{common,stat}
+        --         data.common_list_info.{total,has_more,cursor}
+        local data_list = result.data.data_list
+        local clinfo = result.data.common_list_info
+        if type(clinfo) == "table" then
+            cursor = clinfo.cursor
+            if clinfo.has_more ~= nil then has_more = clinfo.has_more end
+        end
+        if type(data_list) == "table" and #data_list > 0 then
+            comments = {}
+            total = (clinfo and clinfo.total) or #data_list
+            for _, item in ipairs(data_list) do
+                local c = item.comment or item
+                local common = c.common or {}
+                local content = common.content or {}
+                local user_info = common.user_info or {}
+                local base_info = user_info.base_info or user_info
+                local stat = c.stat or {}
+
+                table.insert(comments, {
+                    username = base_info.user_name or common.user_name or "匿名",
+                    text = content.text or common.text or "",
+                    like_count = stat.digg_count or 0,
+                    reply_count = stat.reply_count or 0,
+                    create_time = common.create_timestamp or common.create_time,
+                    para_src = (c.expand and c.expand.para_src_content) or "",
+                })
+            end
+        else
+            -- 旧格式兼容: data.comments[]
+            local c = result.data.comments
+            if type(c) == "table" then
+                comments = c
+                total = result.data.total or #c
+            end
+        end
+    elseif type(result) == "table" then
+        -- 旧格式兼容: result.comments[]
+        comments = result.comments
+        total = result.total or 0
+    end
+    if type(comments) ~= "table" then comments = {} end
+    if total == 0 then total = #comments end
+    return comments, total, cursor, has_more
+end
+
+-- 归一化为富排版 items：{ abstract, author, content, likes_count }（过滤空正文）
+local function _normParaRichItems(comments, abstract)
+    local rich_items = {}
+    for _, comment in ipairs(comments or {}) do
+        local username = tostring(comment.username or comment.user_name
+            or (comment.user and comment.user.user_name)
+            or (comment.user and comment.user.nick_name)
+            or comment.nick_name or comment.nickname or "匿名")
+        local content_text = tostring(comment.text or comment.content or "")
+        local like_count = tonumber(comment.like_count or comment.likeCount
+            or comment.digg_count) or 0
+        if content_text ~= "" then
+            table.insert(rich_items, {
+                abstract = abstract,
+                author = username,
+                content = content_text,
+                likes_count = like_count,
+            })
+        end
+    end
+    return rich_items
+end
+
 -- 显示段评详情弹窗（纯 UI 渲染，不做网络请求）
-function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result, err)
+function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result, err, bubble_count)
     local self = self
+    -- 续拉需要原始 ident（shushan:<bid>:<cid>:<pid>），从章节缓存按 index 取回
+    local reviews = _state.getCurrentParaReviews()
+    local pr0 = reviews and reviews[index]
+    local ident = pr0 and pr0.ident or nil
     -- 懒加载富排版段评弹框（含 freetype/xtext 渲染管线），仅在本弹框真正要展示时拉取
     local ok_reviewpopup, ReviewPopup = pcall(require, "fanqie.review_popup")
     if not ok_reviewpopup or not ReviewPopup then
@@ -525,51 +612,12 @@ function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result,
             .. " total=" .. tostring(total_val))
     end
 
-    -- 解析评论列表（支持新格式 data_list 和旧格式 comments）
-    local comments = nil
-    local total = 0
-
-    if type(result) == "table" and type(result.data) == "table" then
-        -- 新格式: /api/fanqie/comment/paragraph/list
-        -- data.data_list[].comment.{common,stat}
-        -- data.common_list_info.{total,has_more,cursor}
-        local data_list = result.data.data_list
-        if type(data_list) == "table" and #data_list > 0 then
-            comments = {}
-            total = (result.data.common_list_info and result.data.common_list_info.total) or #data_list
-            for _, item in ipairs(data_list) do
-                local c = item.comment or item
-                local common = c.common or {}
-                local content = common.content or {}
-                local user_info = common.user_info or {}
-                local base_info = user_info.base_info or user_info
-                local stat = c.stat or {}
-
-                table.insert(comments, {
-                    username = base_info.user_name or common.user_name or "匿名",
-                    text = content.text or common.text or "",
-                    like_count = stat.digg_count or 0,
-                    reply_count = stat.reply_count or 0,
-                    create_time = common.create_timestamp or common.create_time,
-                    para_src = (c.expand and c.expand.para_src_content) or "",
-                })
-            end
-        else
-            -- 旧格式兼容: data.comments[]
-            local c = result.data.comments
-            if type(c) == "table" then
-                comments = c
-                total = result.data.total or #c
-            end
-        end
-    elseif type(result) == "table" then
-        -- 旧格式兼容: result.comments[]
-        comments = result.comments
-        total = result.total or 0
-    end
-
-    if type(comments) ~= "table" then comments = {} end
-    if total == 0 then total = #comments end
+    -- 解析评论列表（支持新格式 data_list 和旧格式 comments），并取书山分页游标
+    local comments, total, more_cursor, more_has_more = _parseParaReviewResult(result)
+    -- 书山 /idea_comment 不返回 total（无 common_list_info），
+    -- 气泡 count 才是该段评论总数 → 用它驱动「还剩 N 条」与按钮显隐
+    local bubble_total = tonumber(bubble_count) or 0
+    if bubble_total > total then total = bubble_total end
 
     self:closeBusy()
 
@@ -586,24 +634,7 @@ function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result,
         end
 
         -- 归一化 items: { abstract, author, content, likes_count }
-        local rich_items = {}
-        for _, comment in ipairs(comments) do
-            local username = tostring(comment.username or comment.user_name
-                or (comment.user and comment.user.user_name)
-                or (comment.user and comment.user.nick_name)
-                or comment.nick_name or comment.nickname or "匿名")
-            local content_text = tostring(comment.text or comment.content or "")
-            local like_count = tonumber(comment.like_count or comment.likeCount
-                or comment.digg_count) or 0
-            if content_text ~= "" then
-                table.insert(rich_items, {
-                    abstract = abstract,
-                    author = username,
-                    content = content_text,
-                    likes_count = like_count,
-                })
-            end
-        end
+        local rich_items = _normParaRichItems(comments, abstract)
 
         if #rich_items == 0 then
             self:showInfo(T(_("本条段评共 %1 条评论，暂无显示数据"), tostring(total)))
@@ -635,7 +666,6 @@ function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result,
             doc_font_size = nil,
             doc_margins = nil,
         }
-
         -- 从当前阅读器 ui 读取正文字体/字号/边距（带降级，读不到就交给弹框默认）
         if self.ui then
             local ok_dev, Device = pcall(require, "device")
@@ -659,7 +689,126 @@ function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result,
             end
         end
 
-        ReviewPopup.show(opts)
+        -- ================================================================
+        -- 书山段评懒加载：首屏只展示已拉到的 1 页（20 条），
+        -- 底部「继续加载（还剩 N 条）」按钮续拉下一页（参考 Leko Reader）。
+        -- ================================================================
+        _para_more_state = {
+            ident = tostring(ident),
+            index = index,
+            total_reviews = total_reviews,
+            rich_items = rich_items,
+            total = total,
+            cursor = more_cursor,
+            has_more = more_has_more,
+            busy = false,
+            ui_opts = nil,
+            restoring = false,   -- 续拉重开时置 true，弹窗恢复滚动位置；新段落打开时必须为 false
+        }
+
+        -- ⚠️ 前置声明：refresh_popup 体内引用 load_more，若在其 local 定义之前
+        -- 引用会解析为同名全局变量(nil)，导致「继续加载」按钮 on_more=nil 不显示
+        local load_more
+        local function refresh_popup()
+            local st = _para_more_state
+            if not st then return end
+            local o = {}
+            for k, v in pairs(st.ui_opts or {}) do o[k] = v end
+            o.pages = st.rich_items
+            o.para_nav = function(dir)
+                if dir == "prev" then navigate_para(-1)
+                else navigate_para(1) end
+            end
+            -- 对齐 Leko：还有余量就一定有按钮；总数已知 →「还剩 N 条」，
+            -- 总数未知（气泡 count 缺失）→「继续加载更多评论」
+            -- WARN 级落盘：不开 developer_logs 也能诊断按钮为何不出现
+            if Log then
+                Log.warn("[段评] 按钮判定: has_more=" .. tostring(st.has_more)
+                    .. " total=" .. tostring(st.total)
+                    .. " loaded=" .. tostring(#st.rich_items)
+                    .. " cursor=" .. tostring(st.cursor)
+                    .. " | 会话加载=" .. tostring(_para_more_state and "ok" or "?"))
+            end
+            if st.has_more then
+                local remaining = (tonumber(st.total) or 0) - #st.rich_items
+                if remaining > 0 then
+                    o.more_text = string.format("继续加载（还剩 %d 条）", remaining)
+                else
+                    o.more_text = "继续加载更多评论"
+                end
+                o.on_more = load_more
+            else
+                o.more_text = nil
+                o.on_more = nil
+            end
+            -- 续拉重开恢复滚动位置；点新段落打开时不恢复（从第一页看起）
+            o.restore_scroll = st.restoring or nil
+            st.restoring = false
+            ReviewPopup.show(o)
+        end
+
+        load_more = function()
+            local st = _para_more_state
+            if not st or not st.has_more or st.busy then return end
+            st.busy = true
+            st.restoring = true   -- 续拉成功重开时恢复滚动位置
+            if Log then
+                Log.info("[段评] 继续加载: ident=" .. st.ident:sub(1, 80)
+                    .. " cursor=" .. tostring(st.cursor))
+            end
+            Async.run(function()
+                local c = Client:new(self.settings)
+                return c:shushan_get_para_review(st.ident,
+                    { cursor = st.cursor, count = 20, page_max = 1 })
+            end, function(ok2, result2, err2)
+                st.busy = false
+                if ok2 and type(result2) == "table" then
+                    local comments2, total2, cursor2, has_more2 =
+                        _parseParaReviewResult(result2)
+                    -- 续拉页的引文与首屏相同：优先取本页 para_src，否则沿用首屏
+                    local abstract2 = ""
+                    for _, c0 in ipairs(comments2) do
+                        local src = tostring(c0.para_src or "")
+                        if src ~= "" then abstract2 = src break end
+                    end
+                    if abstract2 == "" and st.rich_items[1] then
+                        abstract2 = st.rich_items[1].abstract or ""
+                    end
+                    local new_items = _normParaRichItems(comments2, abstract2)
+                    for _, it in ipairs(new_items) do
+                        table.insert(st.rich_items, it)
+                    end
+                    if (tonumber(total2) or 0) > (tonumber(st.total) or 0) then
+                        st.total = total2
+                    end
+                    st.cursor = cursor2
+                    if has_more2 ~= nil then st.has_more = has_more2 end
+                    if Log then
+                        Log.info("[段评] 继续加载成功: +" .. tostring(#new_items)
+                            .. " 已加载=" .. tostring(#st.rich_items)
+                            .. "/" .. tostring(st.total)
+                            .. " has_more=" .. tostring(st.has_more))
+                    end
+                else
+                    if Log then
+                        Log.error("[段评] 继续加载失败:", tostring(err2 or result2))
+                    end
+                    self:showInfo(_("继续加载失败，请稍后重试"))
+                end
+                refresh_popup()
+            end, { poll_interval = 0.125, timeout = 45 })
+        end
+
+        _para_more_state.ui_opts = {
+            position = "bottom",
+            height_ratio = opts.height_ratio,
+            contrast = opts.contrast,
+            tap_to_page = opts.tap_to_page,
+            doc_font_name = opts.doc_font_name,
+            doc_font_size = opts.doc_font_size,
+            doc_margins = opts.doc_margins,
+        }
+        refresh_popup()
     else
         self:showInfo(T(_("本条段评共 %1 条评论，暂无显示数据"), tostring(total)))
     end

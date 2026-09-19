@@ -58,6 +58,14 @@ local ThoughtPopupWidget = InputContainer:extend{
     -- close stays available through tap-outside and the Back key.
     para_nav = nil,
 
+    -- 底部「继续加载（还剩 N 条）」按钮：more_text 为文案（nil 则不显示），
+    -- on_more 为点击回调。加载中回调内部用 _more_busy 挡连点。
+    more_text = nil,
+    on_more = nil,
+    _more_busy = false,
+    -- 续拉重开后恢复的滚动位置（内容坐标）；_buildLayout 消费后清零
+    _restore_offset = nil,
+
     _pages = nil,
     _scroll_container = nil,
 
@@ -122,6 +130,14 @@ function ThoughtPopupWidget:onShow()
 end
 
 function ThoughtPopupWidget:_reopen(opts)
+    -- 续拉重开（opts.restore_scroll=true）才恢复滚动位置；
+    -- 点新段落重开时不带该标记，避免弹窗一打开就停在旧滚动位置
+    if opts.restore_scroll and self._scroll_container then
+        self._restore_offset = self._scroll_container.scroll_offset or 0
+    else
+        self._restore_offset = nil
+    end
+    self._more_busy = false
     self.items = opts.items or {}
     if opts.doc_font_name then self.doc_font_name = opts.doc_font_name end
     if opts.doc_font_size then self.doc_font_size = opts.doc_font_size end
@@ -132,6 +148,8 @@ function ThoughtPopupWidget:_reopen(opts)
     if opts.dialog then self.dialog = opts.dialog end
     self.close_callback = opts.close_callback
     self.para_nav = opts.para_nav
+    self.more_text = opts.more_text
+    self.on_more = opts.on_more
     self.height_ratio = math.max(0.1, math.min(0.9, self.height_ratio or 0.70))
     self.height = math.floor(Screen:getHeight() * self.height_ratio)
 
@@ -149,6 +167,38 @@ function ThoughtPopupWidget:_buildLayout()
 
     local ratio_h = math.floor(Screen:getHeight() * self.height_ratio)
     local chrome = TOP_BORDER_SIZE + PADDING_TOP + PADDING_BOTTOM
+
+    -- 「继续加载」按钮：先建好并量高度，把占的纵向空间一起计进 chrome，
+    -- 否则视口会把按钮挤出屏幕（对齐 Leko Reader 的底部按钮做法）
+    local more_btn
+    if self.more_text and self.on_more then
+        local Button = require("ui/widget/button")
+        more_btn = Button:new{
+            text = self.more_text,
+            width = self.width - Screen:scaleBySize(24),  -- 铺满（左右各留 12px 边距）
+            text_font_bold = false,
+            callback = function()
+                if self._more_busy then return end
+                self._more_busy = true
+                self.on_more()
+            end,
+        }
+        local ok_size, btn_size = pcall(function() return more_btn:getSize() end)
+        local btn_h = (ok_size and btn_size and btn_size.h) or Screen:scaleBySize(36)
+        chrome = chrome + btn_h + Screen:scaleBySize(14)
+    end
+    -- 渲染层诊断：无条件打（不管按钮建没建），用插件自己的 logger（写 fanqie.log）
+    do
+        local ok_log, FLog = pcall(require, "fanqie.logger")
+        if ok_log and FLog and FLog.warn then
+            FLog.warn("[段评] 布局: has_btn=" .. tostring(more_btn ~= nil)
+                .. " more_text=" .. tostring(self.more_text)
+                .. " on_more=" .. tostring(self.on_more ~= nil)
+                .. " ratio_h=" .. tostring(ratio_h)
+                .. " content_h=" .. tostring(content_h)
+                .. " chrome=" .. tostring(chrome))
+        end
+    end
     local blank_tolerance = math.ceil((self.doc_font_size or Screen:scaleBySize(18)) * 1.2)
 
     local viewport_h
@@ -168,6 +218,8 @@ function ThoughtPopupWidget:_buildLayout()
         margin_left = self.doc_margins.left,
         text_w = text_w,
         dialog = self,
+        -- 续拉重开时恢复滚动位置（init 内会按新的 max_offset 自动钳制）
+        scroll_offset = self._restore_offset or 0,
         -- Tap paging is handled by ThoughtPopupWidget.onTapClose (it owns the
         -- tap gesture, so the ScrollContainer's own TapScrollText would never
         -- fire). Keep it disabled here to avoid a dead gesture registration.
@@ -179,6 +231,7 @@ function ThoughtPopupWidget:_buildLayout()
         end,
     }
     self._scroll_container = scroll
+    self._restore_offset = nil
 
     local vgroup_children = {
         LineWidget:new{
@@ -188,6 +241,12 @@ function ThoughtPopupWidget:_buildLayout()
         scroll,
         VerticalSpan:new{ width = PADDING_BOTTOM },
     }
+
+    if more_btn then
+        table.insert(vgroup_children, VerticalSpan:new{ width = Screen:scaleBySize(4) })
+        table.insert(vgroup_children, more_btn)
+        table.insert(vgroup_children, VerticalSpan:new{ width = Screen:scaleBySize(10) })
+    end
 
     local vgroup = VerticalGroup:new(vgroup_children)
 
