@@ -7,7 +7,6 @@
 
 > 本项目不是上游项目的官方版本。上游来源与代码差异在 Fork 关系与提交历史中公开保留。
 
-
 ## 与原版的主要区别
 
 - **移除上游旧书源**：删除上游内置的「晴天聚合」「大灰狼」两个书源及其全部配置项，不再维护。
@@ -82,3 +81,14 @@ koreader/plugins/fanqie.koplugin/fanqie.koplugin/main.lua   ← 错误
 ## 许可证
 
 MIT License
+
+## 项目推荐
+
+同一个设备生态里的其他 KOReader 插件与工具，都出自本人维护：
+
+| 项目 | 简介 |
+|------|------|
+| [legadocomic.koplugin](https://github.com/seaneasysaid/legadocomic.koplugin) | KOReader 漫画流式阅读插件：对接安卓「开源阅读」(Legado) WebService 的漫画书源，支持目录浏览、图片流式加载与阅读进度同步。 |
+| [readingstats.koplugin](https://github.com/seaneasysaid/readingstats.koplugin) | 轻量阅读统计：日历式阅读足迹 + GitHub 风格热力图 + 阅读分析（含年度 / 月度书籍排行）。 |
+| [leko-reader-fixed](https://github.com/seaneasysaid/leko-reader-fixed) | 全程本地运行的 KOReader 网络小说插件，兼容 Legado 书源，主打轻快流畅的阅读体验。 |
+| [koreader-remote](https://github.com/seaneasysaid/koreader-remote) | 手机浏览器通过 Wi-Fi 无线遥控 KOReader 的网页工具。 |
