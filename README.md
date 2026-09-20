@@ -4,6 +4,9 @@
 
 > 本项目不是上游项目的官方版本。上游来源与代码差异在 Fork 关系与提交历史中公开保留。
 
+[![release](https://img.shields.io/github/v/release/seaneasysaid/fanqie.koplugin-fixed?label=release&labelColor=555555&color=007ec6)](https://github.com/seaneasysaid/fanqie.koplugin-fixed/releases/latest)
+[![downloads](https://img.shields.io/github/downloads/seaneasysaid/fanqie.koplugin-fixed/total?label=downloads&labelColor=555555&color=dfb317)](https://github.com/seaneasysaid/fanqie.koplugin-fixed/releases)
+
 ## 与原版的主要区别
 
 - **移除上游旧书源**：删除上游内置的「晴天聚合」「大灰狼」两个书源及其全部配置项，不再维护。
