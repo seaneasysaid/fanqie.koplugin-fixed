@@ -73,6 +73,9 @@ local Patches = safe_require("patches.core")
 local Bookshelf = safe_require("fanqie.bookshelf")
 local ReaderNavigation = safe_require("fanqie.reader_navigation")
 
+-- 阅读统计合并：番茄"一章一文件"在 KOReader 统计里按书合并成一条记录
+local Stats = safe_require("fanqie.stats")
+
 -- 插件元信息（版本号、关于文案）：集中管理，避免多处维护不同步
 local Info = safe_require("fanqie.info")
 
@@ -232,6 +235,21 @@ function FanQiePlugin:ensurePatchesInstalled()
     local Patches = require("patches.core")
     if not Patches.verifyPatched("ReaderToc") then
         Patches.install()
+    end
+end
+
+-- 文档就绪：把本章的阅读统计并入"整本书"那一条记录。
+-- 番茄每章一个 .html，KOReader 统计默认会把每章当成一本；这里在 statistics
+-- 实例上换成按 book_id 的固定身份，界面标题不受影响。
+function FanQiePlugin:onReaderReady(config)
+    if not Stats then return end
+    local ok, res = pcall(Stats.sync, self.ui, self.settings)
+    if not ok then
+        if Log and Log.warn then Log.warn("stats merge failed:", log_error(res)) end
+        return
+    end
+    if res then
+        Log.info("[FanQie] 阅读统计按书合并:", tostring(res.title), "/", tostring(res.book_id))
     end
 end
 

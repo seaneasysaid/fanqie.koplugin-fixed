@@ -663,4 +663,45 @@ function Bookshelf:downloadBook(book)
     require("fanqie.download").showOptionsDialog(self, book, chapters)
 end
 
+-- 按 book_id 查一本书的标题/作者（仅供阅读统计合并使用）
+-- 只读：书架内存缓存 → shelf_cache.lua 文件缓存，不触发任何网络请求。
+function Bookshelf.find_book_meta(book_id, settings)
+    if not book_id then return nil end
+    book_id = tostring(book_id)
+
+    local function pick(books)
+        if type(books) ~= "table" then return nil end
+        for _, b in ipairs(books) do
+            if type(b) == "table" and tostring(b.book_id or b.bookId or "") == book_id then
+                return {
+                    book_id = book_id,
+                    title = b.title or b.book_name or b.name or "",
+                    author = b.author or b.author_name or "",
+                }
+            end
+        end
+        return nil
+    end
+
+    local found = pick(SHELF_MEM_CACHE)
+    if found then return found end
+
+    if ok_H and H and H.file_exists and settings then
+        local cache_path = get_shelf_cache_path(settings)
+        if H.file_exists(cache_path) then
+            local ok, data = pcall(function()
+                local chunk = loadfile(cache_path)
+                return chunk and chunk() or nil
+            end)
+            if ok and type(data) == "table" then
+                if Log and Log.info then
+                    Log.info("stats: book meta from shelf cache " .. cache_path)
+                end
+                return pick(data)
+            end
+        end
+    end
+    return nil
+end
+
 return Bookshelf
