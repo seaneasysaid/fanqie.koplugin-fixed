@@ -756,6 +756,39 @@ function ShuShan.search(client, settings, keyword, opts)
     return obj.data or obj
 end
 
+-- 按 book_id 精确认领一条搜索结果。
+--
+-- 为什么要「认领」而不是直接取第一条：搜索是**按书名**做的，而书名本身
+-- 可能已经过时（番茄改名后 Web 名还是旧的）。`book_url` 是 base64 编码的
+-- 番茄详情地址，解码后里面带 `book_id=<id>`，用它做精确匹配就不会认错书。
+--
+-- ⚠️ 书山搜索索引里的封面会滞后：2026-11-07 实测 28 本，25 本与知秋一致，
+--    2 本仍是改名前的旧图、1 本是第三版。所以它只做知秋之后的兜底。
+--
+-- @return table|nil { name, cover } — cover 是 origin 原图地址
+function ShuShan.find_book(client, settings, book_id, keyword, opts)
+    if book_id == nil or tostring(book_id) == "" then return nil end
+    local kw = H.trim(keyword or "")
+    if kw == "" then return nil end
+
+    local ok, rows = pcall(ShuShan.search, client, settings, kw, opts)
+    if not ok or type(rows) ~= "table" then return nil end
+
+    local target = "book_id=" .. tostring(book_id)
+    for _, row in ipairs(rows) do
+        if type(row) == "table" then
+            local raw = ShuShan.base64_decode(tostring(row.book_url or ""))
+            if type(raw) == "string" and raw:find(target, 1, true) then
+                return {
+                    name = H.trim(row.title or ""),
+                    cover = H.trim(row.cover or ""),
+                }
+            end
+        end
+    end
+    return nil
+end
+
 -- 节点测速（连通性 + 延迟）
 -- ⚠️ /detection 返回 200 + 纯文本「书山聚合」，不是 JSON：必须按 HTTP 2xx 判存活，
 --    走严格 JSON 判定会把每个节点都判坏，出现「能看书却检测失败」。

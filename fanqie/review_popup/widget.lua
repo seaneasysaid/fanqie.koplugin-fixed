@@ -165,7 +165,7 @@ end
 
 function ThoughtPopupWidget:onShow()
     UIManager:setDirty(self, function()
-        return "partial", self.container.dimen
+        return "ui", self.container.dimen
     end)
 end
 
@@ -217,8 +217,13 @@ end
 function ThoughtPopupWidget:_buildLayout()
     self:clear()
 
-    -- 「真的画过图」计数归零：它挂在 PageRenderer 上、而弹窗是池化复用的，
-    -- 不归零的话看过一次图之后，之后每次关窗（哪怕纯文字）都会触发 full 刷新。
+    -- 「真的画过图」计数归零：它挂在 PageRenderer 上、而弹窗是池化复用的。
+    -- 但归零前要把「本次弹窗会话画过图」记下来：点另一段的段评走的是 _reopen
+    -- （同一个 widget、不关窗），新段落可能没有图，计数一归零，关窗时就判不出
+    -- 「刚才那屏图需要全刷」，残影会留在阅读区。会话标记只在关窗时清。
+    if (tonumber(self._pages._drawn_images) or 0) > 0 then
+        self._had_images_session = true
+    end
     self._pages._drawn_images = 0
 
     local item_width = math.min(math.ceil(self.doc_margins.right * 2 / 5), Screen:scaleBySize(10))
@@ -428,11 +433,14 @@ function ThoughtPopupWidget:_startImageDownloads()
 end
 
 --- 图片落盘后重画：页面位图里烤的是旧占位框，必须清掉再让它重绘。
+--- 用 "ui" 而非 "partial"：弹窗是盖在 ReaderUI 上的 UI 元素，partial 会计入
+--- flashing promotion（每 N 次提升为 flashui 闪白），在 REAGL 设备上还会被
+--- 强制成全屏 FULL 更新 —— 表现就是上方正文像蒙了一层白纱。
 function ThoughtPopupWidget:_refreshImageArea()
     if not self._scroll_container then return end
     self._pages:_freePageBBs()
     UIManager:setDirty(self, function()
-        return "partial", self._scroll_container.dimen
+        return "ui", self._scroll_container.dimen
     end)
 end
 
@@ -466,22 +474,24 @@ function ThoughtPopupWidget:onCloseWidget()
     self._img_running = false
     self._img_refresh_pending = false
 
-    -- 图片是大面积深色块，partial 局部刷新擦不干净：关窗后会留下图的鬼影
-    -- （上游 comment_view 也踩过同一个坑）。但鬼影只可能在弹窗矩形内 ——
-    -- 用「区域内 full」把黑闪限制在弹窗那一条，不再整屏闪。
-    local had_images = self._pages and (tonumber(self._pages._drawn_images) or 0) > 0
-    UIManager:setDirty(self, function()
-        return "partial", self.container.dimen
-    end)
+    -- 有图：整屏全刷。图片是大面积深色块，连「区域内 full」都擦不干净，
+    --       关窗后上方正文会留残影 / 发灰。
+    -- 纯文字：仍给一条「弹窗矩形的 ui 刷新」。这不是多余的一次 ——
+    --       UIManager:close() 自己不排刷新（setDirty 不带模式会直接丢弃），
+    --       _repaint 里 dirty 却无刷新入队时，会兜底执行一次
+    --       `_refresh("partial")`，那是**整屏** partial：在 Kindle 的 REAGL
+    --       波形上正是「正文像蒙了层白纱」的来源。给它一条 ui 区域刷新，
+    --       既把弹窗那块重画掉，又不会让整屏正文被洗一遍。
+    local had_images = self._had_images_session
+        or (self._pages and (tonumber(self._pages._drawn_images) or 0) > 0)
+    -- 会话结束：标记归零，池化复用时下一次开窗从「纯文字」算起
+    self._had_images_session = nil
     if had_images then
-        local dim = self.container and self.container.dimen
-        if dim then
-            UIManager:setDirty(nil, function()
-                return "full", dim
-            end)
-        else
-            UIManager:setDirty(nil, "full")
-        end
+        UIManager:setDirty(nil, "full")
+    else
+        UIManager:setDirty(self, function()
+            return "ui", self.container.dimen
+        end)
     end
     if self.close_callback then
         local callback = self.close_callback
@@ -562,7 +572,7 @@ function ThoughtPopupWidget:_refreshAfterReplyChange()
         self.doc_font_weight, self.doc_font_gamma)
     self:_buildLayout()
     UIManager:setDirty(self, function()
-        return "partial", self.container.dimen
+        return "ui", self.container.dimen
     end)
 end
 

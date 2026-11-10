@@ -223,40 +223,62 @@ function Bookshelf:showBookshelf(opts)
         return false
     end
 
-    -- 非强制刷新：优先显示本地缓存，有网后台刷新
+    -- 非强制刷新：优先显示本地缓存，有网后台刷新。
+    -- ⚠️ 缓存里若有「没校正过」的书（刚加进书架的新书），不能立刻显示：
+    --    那会先闪一次 Web 推广名 + 旧封面。改为等后台刷新（其中已在子进程里
+    --    用官方源批量校正完）再渲染，首屏直接是 App 当前名字和封面。
     if not force_refresh then
         local cached_shelf = load_shelf_cache(self.settings)
         if cached_shelf and #cached_shelf > 0 then
-            self:showBookList(cached_shelf)
-            -- 顺手补齐还没查过的书名（后台、串行、有缓存挡着，稳态 0 请求）
-            self:_ensureBookNames(cached_shelf)
-            -- 后台异步刷新：门控——已有刷新在跑就跳过（不重入、不排队，
-            -- 缓存已经显示，刷新交给正在进行的那个任务）
-            if self:checkNetwork() and not refreshing_now() then
-                local plugin = self
-                if ok_Async and Async then
-                    set_refreshing(true)
-                    self:showBusy(_("正在刷新书架..."))
-                    Async.run(function()
-                        return plugin:get_shelf()
-                    end, function(ok, result, err)
-                        plugin:closeBusy()
-                        set_refreshing(false)
-                        if ok and type(result) == "table" and #result > 0 then
-                            save_shelf_cache(plugin.settings, result)
-                            maybe_prune_covers(plugin.settings, result)
-                            plugin:showBookList(result)
-                            plugin:_ensureBookNames(result)
-                        end
-                    end, {
-                        poll_interval = 0.3, timeout = 60,
-                        on_cancel = function()
-                            plugin:closeBusy()
-                            set_refreshing(false)
-                        end,
-                    })
+            local plugin = self
+            local pending = false
+            if ok_BookNames and BookNames and BookNames.has_pending then
+                local ok_p, p = pcall(BookNames.has_pending, self.settings, cached_shelf)
+                pending = ok_p and p == true
+            end
+            if not pending then
+                self:showBookList(cached_shelf)
+                -- 稳态下没有待校正的书，这里 0 请求
+                self:_ensureBookNames(cached_shelf)
+            end
+            -- 后台异步刷新：门控——已有刷新在跑就跳过（不重入、不排队）
+            if self:checkNetwork() and not refreshing_now() and ok_Async and Async then
+                set_refreshing(true)
+                self:showBusy(pending and _("正在获取书籍信息...") or _("正在刷新书架..."))
+                local settled = false
+                local function finish(ok, result)
+                    if settled then return end
+                    settled = true
+                    plugin:closeBusy()
+                    set_refreshing(false)
+                    if ok and type(result) == "table" and #result > 0 then
+                        save_shelf_cache(plugin.settings, result)
+                        maybe_prune_covers(plugin.settings, result)
+                        plugin:showBookList(result)
+                        plugin:_ensureBookNames(result)
+                    elseif pending then
+                        -- 刷新失败 / 超时 / 取消：回退缓存，别把界面留在空白
+                        plugin:showBookList(cached_shelf)
+                        plugin:_ensureBookNames(cached_shelf)
+                    end
                 end
-                -- Async 不可用：不做后台刷新（缓存已在显示，没必要同步阻塞一次）
+                Async.run(function()
+                    -- 只有 pending 时才强制走网络：内存里的 5 分钟书架缓存
+                    -- 可能还是「没有这本新书」的旧快照；稳态保持原有缓存语义
+                    return plugin:get_shelf(pending, true)
+                end, function(ok, result, err)
+                    finish(ok, result)
+                end, {
+                    poll_interval = 0.3, timeout = 60,
+                    on_cancel = function()
+                        finish(false, nil)
+                    end,
+                })
+            elseif pending then
+                -- 无网 / Async 不可用 / 已有刷新在跑：拿不到 App 值，
+                -- 只能显示缓存（仍会看到 Web 值），但至少不会空白或卡住
+                self:showBookList(cached_shelf)
+                self:_ensureBookNames(cached_shelf)
             end
             return
         end
@@ -281,7 +303,7 @@ function Bookshelf:showBookshelf(opts)
     if ok_Async and Async then
         Async.run(function()
             -- force_refresh=true 跳过 client 内存缓存，从网络获取
-            return plugin:get_shelf(force_refresh)
+            return plugin:get_shelf(force_refresh, true)
         end, function(ok, result, err)
             plugin:closeBusy()
             set_refreshing(false)  -- 统一清位：下面所有 return 都被覆盖
@@ -342,7 +364,9 @@ function Bookshelf:showBookshelf(opts)
     end
 end
 
-function Bookshelf:get_shelf(force_refresh)
+--- @param allow_preflight boolean|nil 只在 Async 子进程里传 true：
+---        渲染前用官方源批量校正并预下载封面，界面第一次显示就是 App 值。
+function Bookshelf:get_shelf(force_refresh, allow_preflight)
     if Log then Log.debug("fetching shelf from API" .. (force_refresh and " (force refresh)" or "")) end
     local result = self.client:fetch_shelf_detail(force_refresh)
 
@@ -403,8 +427,18 @@ function Bookshelf:get_shelf(force_refresh)
             end
         end
     end
-    -- 已有缓存的书名立刻替换成 App 正式名（没缓存过的先保持 SEO 名，
-    -- 由 _ensureBookNames 在后台补齐；绝不阻塞书架打开）
+    -- 渲染前先把未校正的书用官方源一次拿齐（名字 + 封面 + 封面图片落盘）。
+    -- 只在后台子进程里跑：这里发网络请求不阻塞 UI，失败静默回退。
+    -- ⚠️ 先确认子进程可用：Async 在 fork 失败时会降级成「同步执行」，
+    --    那样这段预取就会跑在 UI 线程上，把开书架卡住十几秒。
+    if allow_preflight and ok_BookNames and BookNames and BookNames.preflight then
+        local sub = ok_Async and Async and Async.is_available and Async.is_available()
+        if sub then
+            pcall(BookNames.preflight, self.client, self.settings, books)
+        end
+    end
+    -- 已有缓存的书名替换成 App 正式名；官方没拿到的仍保持 SEO 名，
+    -- 由 _ensureBookNames 在后台用三方源补齐。
     if ok_BookNames and BookNames then
         pcall(BookNames.decorate, self and self.settings or nil, books)
     end

@@ -384,6 +384,62 @@ function ZhiQiu.get_catalog(client, settings, book_id, opts)
     return obj.data or obj
 end
 
+-- 书籍详情：GET /novel/info?novelId=<book_id>
+--
+-- 为什么需要它：番茄 Web 的 `/api/bookshelf/multidetail` 与 App 搜索接口给出的
+-- **书名和封面都停在「改名之前」**（2026-11-07 实测 28 本：22 本改名、21 本换封面，
+-- Web 侧一本都没跟上）。改名=换封面是番茄的固定行为，所以拿 App 数据只剩这条路。
+--
+-- 与 `parse_title` 那种「按名字搜再认领」不同：这里按 **book_id 精确取**，
+-- 不存在搜错书的风险。代价是要 Token（3 天有效期，ensure_token 自动续）。
+--
+-- @return table|nil data  { book_name, thumb_uri, thumb_url, ... }
+-- @return string|nil err   "not configured" / "token" / "auth" / "network" / "empty"
+function ZhiQiu.get_novel_info(client, settings, book_id, opts)
+    opts = opts or {}
+    local cfg = settings:get_source("zhiqiu") or {}
+    if not ZhiQiu.is_configured(cfg) then return nil, "not configured" end
+    if book_id == nil or tostring(book_id) == "" then return nil, "empty" end
+
+    local base = H.trim(cfg.server_url or ZhiQiu.DEFAULT_BASE)
+    if base:sub(-1) == "/" then base = base:sub(1, -2) end
+
+    local function once(token, android_id)
+        local url = base .. "/novel/info?novelId=" .. H.url_encode(tostring(book_id))
+        local text, code = http_get(client, url, {
+            ["x-sec-token"]  = token,
+            ["x-android-id"] = android_id,
+        })
+        if not text or not code then return nil, "network" end
+        if code == 401 or code == 403 then return nil, "auth" end
+        if code < 200 or code >= 300 then return nil, "HTTP " .. tostring(code) end
+        local ok, obj = pcall(function() return client:json_decode(text) end)
+        if not ok or type(obj) ~= "table" then return nil, "json" end
+        local data = obj.data
+        if type(data) ~= "table" then return nil, "empty" end
+        return data, nil
+    end
+
+    local ok_tok, token = pcall(ZhiQiu.ensure_token, client, settings, false)
+    if not ok_tok or H.trim(tostring(token or "")) == "" then return nil, "token" end
+    local android_id = resolve_android_id(settings)
+
+    local data, err = once(token, android_id)
+    if data then return data, nil end
+
+    -- Token 提前失效（服务端吊销 / 本地时钟偏差）：强制重铸一次再试。
+    -- 只重试一次，避免在持续 401 的情况下把铸币额度打空。
+    if err == "auth" then
+        local ok2, token2 = pcall(ZhiQiu.ensure_token, client, settings, true)
+        if ok2 and H.trim(tostring(token2 or "")) ~= "" then
+            local aid2 = resolve_android_id(settings)
+            local data2 = once(token2, aid2)
+            if data2 then return data2, nil end
+        end
+    end
+    return nil, err or "empty"
+end
+
 -- Report whether the source is usable: needs a stored token OR the three
 -- 知秋 credential fields (源作者/官方反馈群/临时Token口令) to self-mint one.
 function ZhiQiu.is_configured(cfg)

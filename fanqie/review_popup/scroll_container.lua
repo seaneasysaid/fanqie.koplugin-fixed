@@ -145,7 +145,7 @@ function ScrollContainer:scrollBy(delta)
         self:_updateScrollBar()
         if self.dialog then
             UIManager:setDirty(self.dialog, function()
-                return "partial", self.dimen
+                return "ui", self.dimen
             end)
         end
     end
@@ -162,7 +162,7 @@ function ScrollContainer:_setOffset(new_offset)
         self:_updateScrollBar()
         if self.dialog then
             UIManager:setDirty(self.dialog, function()
-                return "partial", self.dimen
+                return "ui", self.dimen
             end)
         end
     end

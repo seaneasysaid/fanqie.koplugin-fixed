@@ -8,13 +8,26 @@
 -- 命名改为 book_id.jpg 后，旧缓存（书名.jpg）仍能被 find() 找到并使用，
 -- 不强制迁移——首次重新下载某本书时自然落到新名字，老的慢慢变成孤儿，
 -- 由 prune/maybe_auto_prune 收走。
+--
+-- 2026-11 再改一次：文件名加上 App 封面 hash 短码 `<book_id>_<宽>_<hash8>.jpg`。
+-- 原因：番茄「改名=换封面」，同一本书的封面会变；只靠 book_id+宽度做键，
+-- 换了封面还是命中同一个文件，书架会永远显示旧图。
+-- 没有 App 封面（知秋/书山都不可用）时不带 hash，退回旧的 `<book_id>_<宽>`。
 
 local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
 local ok_Log, Log = pcall(require, "fanqie.logger")
+local ok_FanQie, FanQie = pcall(require, "fanqie.fanqie")
 
 local M = {}
 
 M.SUFFIX = ".jpg"
+-- 文件名里带请求宽度，换尺寸时旧图自然不被命中、自动重下，不必手工清缓存。
+-- 必须与 fanqie.COVER_WIDTH 保持一致：那边改了这边没改，书架会一直用旧尺寸。
+M.COVER_WIDTH = (ok_FanQie and FanQie and FanQie.COVER_WIDTH) or 480
+-- 取图规则换代标记（2026-11-10 v3：分桶选模板，去掉 CDN 补的黑边）。
+-- URL 变了但 cover_hash 仍是同一个图片 hash，不加这一位就会命中旧的带黑边
+-- 文件、永远不重下。改取图模板时把这里 +1 即可让整架封面自然失效。
+M.LAYOUT_TAG = "v3"
 M.PRUNE_DAYS = 30                       -- 自动清理只删「超过这么久没被写过」的
 M.AUTO_PRUNE_BYTES = 200 * 1024 * 1024  -- 目录超过 200MB 才考虑自动清理
 
@@ -64,12 +77,16 @@ function M.file_exists(path)
     return false
 end
 
---- 新命名：<book_id>.jpg；没有 book_id 时退回书名
+--- 新命名：<book_id>_<宽>[_<封面hash8>]_<取图规则>.jpg；没有 book_id 时退回书名
 function M.filename(book)
     if type(book) ~= "table" then return nil end
     local bid = book.book_id or book.bookId
     if bid ~= nil and tostring(bid) ~= "" then
-        return sanitize(bid) .. M.SUFFIX
+        local name = sanitize(bid) .. "_" .. M.COVER_WIDTH
+        if type(book.cover_hash) == "string" and book.cover_hash ~= "" then
+            name = name .. "_" .. sanitize(book.cover_hash)
+        end
+        return name .. "_" .. M.LAYOUT_TAG .. M.SUFFIX
     end
     if type(book.title) == "string" and book.title ~= "" then
         return sanitize(book.title) .. M.SUFFIX
@@ -96,12 +113,19 @@ end
 
 --- 找已存在的封面文件：先新名，再旧名。
 -- 返回 nil 表示没有缓存（调用方去下载）。
+--
+-- ⚠️ 带 cover_hash 时**不做旧名回退**：`<book_id>_<宽>.jpg` / `<book_id>.jpg`
+-- 存的是 Web 那张旧封面，回退过去就等于「换了封面也永远不换」——正是这个
+-- 函数最容易踩的坑。宁可重下一次，下载失败也别拿旧图顶替。
 function M.find(settings, book)
     local dir = M.dir(settings)
     local name = M.filename(book)
     if not name then return nil end
     local path = dir .. "/" .. name
     if M.file_exists(path) then return path end
+    if type(book.cover_hash) == "string" and book.cover_hash ~= "" then
+        return nil
+    end
     local legacy = M.legacy_filename(book)
     if legacy and legacy ~= name then
         local old_path = dir .. "/" .. legacy
@@ -164,8 +188,9 @@ end
 
 --- 把书架集合摊平成「允许保留的文件名」，新旧两套命名都收。
 -- 旧名不能丢：老缓存仍在被 find() 回退使用，删了等于白下一遍。
+-- @return keep 精确文件名集合, ids 在架 book_id 集合（用于放行任意 hash 后缀）
 local function keep_names(books)
-    local keep = {}
+    local keep, ids = {}, {}
     for i = 1, #books do
         local book = books[i]
         local name = M.filename(book)
@@ -177,8 +202,12 @@ local function keep_names(books)
         if type(book.web_title) == "string" and book.web_title ~= "" then
             keep[sanitize(book.web_title) .. M.SUFFIX] = true
         end
+        local bid = book.book_id or book.bookId
+        if bid ~= nil and tostring(bid) ~= "" then
+            ids[sanitize(bid)] = true
+        end
     end
-    return keep
+    return keep, ids
 end
 
 --- 按书架集合删除孤儿封面：已移出书架的书、被同名书顶掉的旧文件。
@@ -195,7 +224,7 @@ function M.prune_orphans(dir, books)
     local L = fs()
     if not L or type(L.dir) ~= "function" then return deleted, freed end
     if type(books) ~= "table" or #books == 0 then return deleted, freed end
-    local keep = keep_names(books)
+    local keep, ids = keep_names(books)
     if next(keep) == nil then return deleted, freed end
     local ok, iter, dir_obj = pcall(L.dir, dir)
     if not ok or type(iter) ~= "function" then return deleted, freed end
@@ -204,7 +233,12 @@ function M.prune_orphans(dir, books)
     local dead, kept = {}, 0
     for name in iter, dir_obj do
         if type(name) == "string" and name:lower():match("%.jpg$") then
-            if keep[name] then
+            -- 带封面 hash 的文件名形如 `<book_id>_<宽>_<hash8>.jpg`。
+            -- 只要这个 book_id 还在书架上就放行 —— 否则 prune 发生在
+            -- decorate 之前（books 还没带 cover_hash）时，会把刚下好的
+            -- 新封面当孤儿删掉，表现是「封面下完又消失、下次打开还得再下」。
+            local id_part = name:match("^(%d+)_%d+_")
+            if keep[name] or (id_part and ids[sanitize(id_part)]) then
                 kept = kept + 1
             else
                 local path = dir .. "/" .. name

@@ -746,6 +746,13 @@ function Client:zhiqiu_get_catalog(book_id, opts)
     return ZhiQiu.get_catalog(self, self.settings, book_id, opts)
 end
 
+-- 书籍详情（App 端书名/封面）：按 book_id 精确取，不走搜索。
+-- Web 端的书名与封面都停在「改名之前」，这是唯一能拿到 App 当前值的通道。
+function Client:zhiqiu_book_info(book_id, opts)
+    local ZhiQiu = require("fanqie.zhiqiu")
+    return ZhiQiu.get_novel_info(self, self.settings, book_id, opts)
+end
+
 -- 书山聚合 Source (ShuShan) — delegate to fanqie/shushan.lua
 -- Base: https://v2.vossc.com  Auth: X-Api-Key(base64 api_key) + X-Device-Id
 -- Content: POST /content (番茄官方 book_id/item_id; 可解锁VIP章)
@@ -762,6 +769,12 @@ function Client:shushan_get_catalog(book_url, opts)
     opts = opts or {}
     local ShuShan = require("fanqie.shushan")
     return ShuShan.get_catalog(self, self.settings, book_url, opts)
+end
+
+-- 书山按 book_id 认领（解码 book_url 精确匹配）。知秋不可用时的封面兜底。
+function Client:shushan_find_book(book_id, keyword, opts)
+    local ShuShan = require("fanqie.shushan")
+    return ShuShan.find_book(self, self.settings, book_id, keyword, opts)
 end
 
 function Client:shushan_search(keyword, opts)

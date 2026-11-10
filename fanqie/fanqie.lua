@@ -11,6 +11,11 @@ FanQie.BASE_URL = "https://fanqienovel.com"
 -- 收敛到这个域名后地址幂等、长期有效。
 FanQie.MOBILE_COVER_CDN = "https://p6-novel.byteimg.com"
 
+-- 封面请求宽度。书架两列时卡片约 470px（Kindle Voyage / Kobo Clara 同级屏），
+-- 取 480 正好 1:1 贴进卡片，不再靠放大糊图；原图 600 宽，未超采样。
+-- ⚠️ 改这个值必须同步 cover_cache.COVER_WIDTH，否则旧尺寸缓存不会失效。
+FanQie.COVER_WIDTH = 480
+
 --- 把番茄封面地址收敛为**无签名**的手机端 CDN 地址。
 -- 输入可以是带签名的 thumb_url、thumb_uri（相对路径）或已经是目标形态的地址；
 -- 幂等：已是无签名地址时原样返回（只换尺寸后缀）。
@@ -26,7 +31,7 @@ function FanQie.mobile_cover(thumb)
         -- 另一种真实形态：主机下直接是裸哈希，例如
         --   https://p9-novel-sign.byteimg.com/a0500010…~tplv-resize:225:300.image?x-expires=…
         -- 这类没有 novel-pic/ 前缀。实测原签名主机去掉查询仍是 403，
-        -- 但换成 p6-novel + ~tplv-shrink:320:0.image 可取（200 / JPEG），
+        -- 但换成 p6-novel + ~tplv-shrink:<w>:0.image 可取（200 / JPEG），
         -- 所以这里统一按「主机之后的路径 + 固定尺寸后缀」重拼。
         -- 只有番茄自己的图片 CDN 才能挪到 p6-novel，别把外部域名的图改坏
         local host, host_path = thumb:match("^https?://([^/]+)/([^?#]+)")
@@ -36,11 +41,11 @@ function FanQie.mobile_cover(thumb)
             end
             return FanQie.MOBILE_COVER_CDN .. "/"
                 .. thumb:gsub("^/", ""):gsub("~tplv[^/]*$", "")
-                .. "~tplv-shrink:320:0.image"
+                .. "~tplv-shrink:" .. FanQie.COVER_WIDTH .. ":0.image"
         end
         path = host_path:gsub("~tplv[^/]*$", "")
     end
-    return FanQie.MOBILE_COVER_CDN .. "/" .. path .. "~tplv-shrink:320:0.image"
+    return FanQie.MOBILE_COVER_CDN .. "/" .. path .. "~tplv-shrink:" .. FanQie.COVER_WIDTH .. ":0.image"
 end
 
 function FanQie.make_shelf_params()

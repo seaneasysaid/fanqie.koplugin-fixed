@@ -64,8 +64,11 @@ local function cellCardMetrics(cell_w, cell_h)
     local border = Size.border.thin
     local max_cw = math.max(1, cell_w - 2 * gutter)
     local max_ch = math.max(1, cell_h - 2 * gutter - title_gap - title_h - sub_gap - sub_h)
-    -- 封面约为 2:3 竖版，卡片锁定同一比例避免四周留白
-    local aspect = 0.68
+    -- 卡片锁定番茄封面原图的 3:4（0.75）。原先用 0.68，等于把 3:4 的封面
+    -- 横向压掉约 10%（方形封面的书要压 30%），人像变瘦、构图走样，
+    -- 观感上就像"换了张封面"。ImageWidget 是直接拉伸不裁切的，卡片比例
+    -- 必须跟着图走，否则再怎么提高分辨率都救不回来。
+    local aspect = 0.75
     local card_w, card_h
     if max_cw / max_ch > aspect then
         card_h = max_ch

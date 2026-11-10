@@ -2190,12 +2190,14 @@ function FanQiePlugin:showBookList(books)
 
     for _, book in ipairs(books) do
         if book.cover then
-            -- 命名规则统一交给 cover_cache：新名 <book_id>.jpg，
+            -- 命名规则统一交给 cover_cache：新名 <book_id>_<宽>.jpg，
             -- 找不到时回退旧名 <书名>.jpg（兼容已下载的旧缓存，不强制重下）
-            local cover_path = CoverCache and CoverCache.find(self.settings, book) or nil
-            if cover_path then
-                book.cover_path = cover_path
-            end
+            --
+            -- ⚠️ 必须**无条件**赋值，不能在命中时才写：shelf_cache.lua 会把上次的
+            -- cover_path 原样存进缓存文件，命中判断一旦保留旧值，封面尺寸/命名
+            -- 一改，旧路径就一直挂着，新图永远不下（表现为「改了参数没生效」）。
+            -- 置 nil 后会由 _preloadAllCovers / _cacheShelfPageCovers 重新下载。
+            book.cover_path = CoverCache and CoverCache.find(self.settings, book) or nil
         end
     end
 
@@ -2243,6 +2245,12 @@ function FanQiePlugin:refreshShelfTitles(books)
     local ok, ShelfView = pcall(require, "fanqie.shelf_view")
     if not ok or type(ShelfView) ~= "table" or not ShelfView.update then return end
     ShelfView.update(self.book_list_menu, books, self._shelf_opts)
+    -- 书名和封面是同一条请求拿回来的：番茄「改名=换封面」，所以校正完书名
+    -- 必须再走一遍封面预下载，否则新封面永远停在缓存里没人取。
+    -- 已经下好的书 cover_path 非空，preload 会直接跳过，不会重复下载。
+    if #books > 0 and self._preloadAllCovers then
+        pcall(self._preloadAllCovers, self, books)
+    end
 end
 
 function FanQiePlugin:_cancelCoverLoading()

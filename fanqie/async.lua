@@ -8,6 +8,14 @@ local ok_ffiutil, ffiutil = pcall(require, "ffi/util")
 local ok_UIManager, UIManager = pcall(require, "ui/uimanager")
 local ok_Log, Log = pcall(require, "fanqie.logger")
 
+-- ffi/util.lua 没有声明 close（Kindle 实测 `missing declaration for symbol
+-- 'close'`）。超时清理需要直接关掉管道读端，这里补一次声明；重复声明由
+-- pcall 兜住，不影响其它模块。
+local ok_ffi, ffi = pcall(require, "ffi")
+if ok_ffi and ffi then
+    pcall(ffi.cdef, "int close(int fd);")
+end
+
 local ok_json, json = pcall(require, "json")
 if not ok_json then
     ok_json, json = pcall(require, "rapidjson")
@@ -177,12 +185,62 @@ function Async.run(work_func, on_done, opts)
     end
 
     -- 终止并清理子进程（避免僵尸），fd 也一并关闭。
+    -- ⚠️ 绝不能在 UI 线程调用 ffiutil.readAllFromFD：它是**阻塞读**，会一直
+    -- 等到「所有」持有管道写端的进程关闭。子进程卡在网络超时时写端不会关；
+    -- 即便先 SIGKILL，它 fork 出的孙进程仍可能继承写端 —— 2026-11-10 在
+    -- Kindle 真机实测：先 KILL 再 read 依旧挂死 20s+。旧实现更糟：先 read
+    -- 后 KILL，terminateSubProcess 永远执行不到，整个 KOReader 冻结。
+    --
+    -- 超时 / 取消 / poll 异常时结果一律丢弃，没必要读管道内容：直接 close
+    -- 读端 fd 即可（真机实测 0 秒返回），孙进程写管道会收到 EPIPE 自行退出。
     local function cleanup(pid_ref, fd_ref)
-        if fd_ref then
-            pcall(ffiutil.readAllFromFD, fd_ref)
+        -- 判断本身也要兜住：异常时按「进程还活着」处理，宁可多 kill 一次。
+        local ok_done, done = pcall(ffiutil.isSubProcessDone, pid_ref)
+        local killed = false
+        if pid_ref and (not ok_done or not done) then
+            pcall(ffiutil.terminateSubProcess, pid_ref)  -- SIGKILL 整个进程组
+            killed = true
         end
-        if pid_ref and not ffiutil.isSubProcessDone(pid_ref) then
-            pcall(ffiutil.terminateSubProcess, pid_ref)
+        if fd_ref then
+            -- 连符号访问都要 pcall：未声明时 `ffi.C.close` 求值就会抛错
+            local closed = false
+            local ok_sym, close_fn = pcall(function()
+                return ok_ffi and ffi and ffi.C and ffi.C.close or nil
+            end)
+            if ok_sym and close_fn ~= nil then
+                closed = pcall(function() close_fn(fd_ref) end) and true or false
+            end
+            if not closed then
+                -- 拿不到 close（极端环境）：也绝不阻塞 UI，只把 fd 交给后台
+                -- 在确认进程退出后再收；收不掉也只是泄漏一个 fd，好过冻死。
+                local tries = 0
+                local function collect()
+                    local ok_call, is_done = pcall(ffiutil.isSubProcessDone, pid_ref)
+                    tries = tries + 1
+                    if (not ok_call) or is_done or tries >= 40 then
+                        pcall(ffiutil.readAllFromFD, fd_ref)
+                        return
+                    end
+                    if ok_UIManager and UIManager then
+                        UIManager:scheduleIn(0.1, collect)
+                    end
+                end
+                if ok_UIManager and UIManager then
+                    UIManager:scheduleIn(0.1, collect)
+                end
+            end
+        end
+        -- SIGKILL 到 waitpid 回收之间有延迟，后台补一次 reap 收僵尸，
+        -- 全程不占用 UI 线程。
+        if killed and pid_ref and ok_UIManager and UIManager then
+            local tries = 0
+            local function reap()
+                local ok_call, is_done = pcall(ffiutil.isSubProcessDone, pid_ref)
+                if (not ok_call) or is_done then return end
+                tries = tries + 1
+                if tries < 20 then UIManager:scheduleIn(0.2, reap) end
+            end
+            UIManager:scheduleIn(0.1, reap)
         end
     end
 
