@@ -1129,12 +1129,35 @@ function ShuShan.get_para_review(client, settings, book_id, item_id, para_id, op
                 end
             end
         end
+        -- 二级回复的图片：和一级同源（reply.segments[type=image] / reply.images）。
+        -- 旧代码这里只映射了 text/user/time/likes，图片字段整个丢弃 → 服务端有图
+        -- 但弹窗里只剩正文里的 `[图片]` 字样，永远不生成图片块（实测 2026-11-23）。
+        local function reply_images(r)
+            local imgs = {}
+            for _, seg in ipairs(r.segments or {}) do
+                if type(seg) == "table" and seg.type == "image"
+                    and type(seg.url) == "string" and seg.url ~= "" then
+                    imgs[#imgs + 1] = { url = seg.url }
+                end
+            end
+            if #imgs == 0 then
+                for _, im in ipairs(r.images or {}) do
+                    if type(im) == "table" and type(im.url) == "string" and im.url ~= "" then
+                        imgs[#imgs + 1] = { url = im.url }
+                    end
+                end
+            end
+            return imgs
+        end
         local replies = {}
         for _, r in ipairs(it.reply_list or {}) do
             if type(r) == "table" then
                 replies[#replies + 1] = {
                     Common = {
-                        content = { text = tostring(r.content or "") },
+                        content = {
+                            text = tostring(r.content or ""),
+                            image_data_list = reply_images(r),
+                        },
                         user_info = { user_name = tostring(r.user_name or "匿名") },
                         create_timestamp = r.time,
                     },

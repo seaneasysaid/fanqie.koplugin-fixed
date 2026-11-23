@@ -21,6 +21,15 @@ if not ok_emoticon or type(Emoticon) ~= "table" or not Emoticon.decode then
     Emoticon = nil
 end
 local function decode(s)
+    if type(s) ~= "string" then return s end
+    -- 番茄服务端在评论正文里塞 `[图片]` 字面量标记图片位置，但图片本体是走
+    -- segments/image_data_list 单独渲染成图片块的。表情解码表没有这一项，
+    -- 不过滤就会在文字里露出难看的 `[图片]`（一级、二级都中招）。
+    -- 图片块照常显示，这里只清文字里的占位符（连同紧邻的空白）。
+    if s:find("[图片]", 1, true) then
+        s = s:gsub("%s*%[图片%]%s*", " ")
+        s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    end
     if not Emoticon then return s end
     local ok, out = pcall(Emoticon.decode, s)
     return (ok and out) or s
