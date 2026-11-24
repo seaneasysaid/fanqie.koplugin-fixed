@@ -298,20 +298,6 @@ function Content.find_chapter_file(settings, book_id, item_id)
     return nil
 end
 
-local function filename_safe(value)
-    value = tostring(value or ""):gsub("[%z%c/\\:%*%?\"<>|]", "_")
-    value = H.trim(value)
-    value = value:gsub("%s+", " ")
-    if value == "" then
-        value = "fanqie"
-    end
-    return value
-end
-
-local function utc_modified()
-    return os.date("!%Y-%m-%dT%H:%M:%SZ")
-end
-
 local function media_type_for(data)
     if data:sub(1, 8) == "\137PNG\r\n\026\n" then
         return ".png", "image/png"
@@ -474,8 +460,9 @@ function Content.clean_chapter_content(raw_content, title)
 
     -- 移除不可见字符（零宽空格、BOM、软连字符、双向控制符等，聚合源广告中大量掺杂）
     -- U+200B-200F, U+2028-202E, U+FEFF, U+00AD
-    content = content:gsub("\226\128[\139\140\141\142\143]", "")  -- U+200B-200F 零宽空格/方向标记
-    content = content:gsub("\226\128[\168\169\170\171\172\173\174]", "")  -- U+2028-202E 行/段分隔符与双向控制符
+    -- U+200B-200F / U+2028-202E 共用 3 字节前缀 E2 80，合并成一次全量扫描；
+    -- U+00AD、U+FEFF 前缀不同，仍各自一遍。
+    content = content:gsub("\226\128[\139-\143\168-\174]", "")  -- U+200B-200F 零宽/方向标记 + U+2028-202E 行段分隔符
     content = content:gsub("\194\173", "")  -- U+00AD 软连字符
     content = content:gsub("\239\187\191", "")  -- U+FEFF BOM
 

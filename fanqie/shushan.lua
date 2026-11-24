@@ -1113,42 +1113,32 @@ function ShuShan.get_para_review(client, settings, book_id, item_id, para_id, op
     }
     local source = H.trim(opts.source or cfg.source or ShuShan.DEFAULT_SOURCE)
 
+    -- 图片提取：一级评论与二级回复同源（segments[type=image] 优先，images 兜底）。
+    -- 单独抽出来是为了两处共用且只创建一次闭包（原先二级那份嵌在 map_item 里，
+    -- 每条段评解析都会重建一次）。旧代码二级只映射 text/user/time/likes，
+    -- 图片字段整个丢弃 → 服务端有图却只剩正文里的 `[图片]` 字样（实测 2026-11-23）。
+    local function extract_images(src)
+        local out = {}
+        for _, seg in ipairs(src.segments or {}) do
+            if type(seg) == "table" and seg.type == "image"
+                and type(seg.url) == "string" and seg.url ~= "" then
+                out[#out + 1] = { url = seg.url }
+            end
+        end
+        if #out == 0 then
+            for _, im in ipairs(src.images or {}) do
+                if type(im) == "table" and type(im.url) == "string" and im.url ~= "" then
+                    out[#out + 1] = { url = im.url }
+                end
+            end
+        end
+        return out
+    end
+
     -- v6 items[] → 插件 data_list[]（main.lua 的 _parseParaReviewResult 可直接吃）
     local function map_item(it)
         if type(it) ~= "table" then return nil end
-        local images = {}
-        for _, seg in ipairs(it.segments or {}) do
-            if type(seg) == "table" and seg.type == "image" and type(seg.url) == "string" and seg.url ~= "" then
-                images[#images + 1] = { url = seg.url }
-            end
-        end
-        if #images == 0 then
-            for _, im in ipairs(it.images or {}) do
-                if type(im) == "table" and type(im.url) == "string" and im.url ~= "" then
-                    images[#images + 1] = { url = im.url }
-                end
-            end
-        end
-        -- 二级回复的图片：和一级同源（reply.segments[type=image] / reply.images）。
-        -- 旧代码这里只映射了 text/user/time/likes，图片字段整个丢弃 → 服务端有图
-        -- 但弹窗里只剩正文里的 `[图片]` 字样，永远不生成图片块（实测 2026-11-23）。
-        local function reply_images(r)
-            local imgs = {}
-            for _, seg in ipairs(r.segments or {}) do
-                if type(seg) == "table" and seg.type == "image"
-                    and type(seg.url) == "string" and seg.url ~= "" then
-                    imgs[#imgs + 1] = { url = seg.url }
-                end
-            end
-            if #imgs == 0 then
-                for _, im in ipairs(r.images or {}) do
-                    if type(im) == "table" and type(im.url) == "string" and im.url ~= "" then
-                        imgs[#imgs + 1] = { url = im.url }
-                    end
-                end
-            end
-            return imgs
-        end
+        local images = extract_images(it)
         local replies = {}
         for _, r in ipairs(it.reply_list or {}) do
             if type(r) == "table" then
@@ -1156,7 +1146,7 @@ function ShuShan.get_para_review(client, settings, book_id, item_id, para_id, op
                     Common = {
                         content = {
                             text = tostring(r.content or ""),
-                            image_data_list = reply_images(r),
+                            image_data_list = extract_images(r),
                         },
                         user_info = { user_name = tostring(r.user_name or "匿名") },
                         create_timestamp = r.time,

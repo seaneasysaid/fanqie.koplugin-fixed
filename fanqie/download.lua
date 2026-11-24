@@ -4,7 +4,6 @@
 local ok_UIManager, UIManager = pcall(require, "ui/uimanager")
 local ok_ButtonDialog, ButtonDialog = pcall(require, "ui/widget/buttondialog")
 local ok_InputDialog, InputDialog = pcall(require, "ui/widget/inputdialog")
-local ok_util, util = pcall(require, "util")
 local ok_ffiutil, ffiutil = pcall(require, "ffi/util")
 local ok_H, H = pcall(require, "fanqie.helper")
 local ok_Content, Content = pcall(require, "fanqie.content")
@@ -39,42 +38,6 @@ local function getCachedChapters(settings, book)
         book.cached_chapters = Content.load_cache_index(settings, book.book_id) or {}
     end
     return book.cached_chapters
-end
-
--- 频次预检：若所有活跃源都被限流，主动等待窗口恢复。
--- 返回 true 表示至少一个源可用；false 表示用户取消。
-local function waitForRateLimit(settings, dialog, current, total)
-    if not ok_SM then return true end
-    while true do
-        local sources = SM.get_active_sources(settings)
-        if #sources == 0 then return true end  -- 无源配置，交给 fetch 报错
-        local max_wait = 0
-        local any_ok = false
-        for _, src in ipairs(sources) do
-            local rl = src.config.rate_limit or {}
-            local ok, wait = SM.rate_limit_peek(src.id, rl.max_requests, rl.window_seconds)
-            if ok then any_ok = true; break end
-            if wait and wait > max_wait then max_wait = wait end
-        end
-        if any_ok then return true end
-        if dialog:isCanceled() then return false end
-        local wait_int = math.max(1, math.ceil(max_wait))
-        dialog:setState{
-            stage = "rate_limit",
-            current = current, total = total,
-            message = string.format("剩余 %ds", wait_int),
-        }
-        -- 分段睡，每秒检查取消并更新剩余等待
-        for i = 1, wait_int do
-            if dialog:isCanceled() then return false end
-            if ok_util then util.sleep(1) else os.execute("sleep 1") end
-            dialog:setState{
-                stage = "rate_limit",
-                current = current, total = total,
-                message = string.format("剩余 %ds", wait_int - i),
-            }
-        end
-    end
 end
 
 -- 执行下载（异步递归实现，UI 线程仅做进度刷新与调度，不阻塞）

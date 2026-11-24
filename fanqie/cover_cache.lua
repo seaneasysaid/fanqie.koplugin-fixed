@@ -233,11 +233,14 @@ function M.prune_orphans(dir, books)
     local dead, kept = {}, 0
     for name in iter, dir_obj do
         if type(name) == "string" and name:lower():match("%.jpg$") then
-            -- 带封面 hash 的文件名形如 `<book_id>_<宽>_<hash8>.jpg`。
-            -- 只要这个 book_id 还在书架上就放行 —— 否则 prune 发生在
-            -- decorate 之前（books 还没带 cover_hash）时，会把刚下好的
-            -- 新封面当孤儿删掉，表现是「封面下完又消失、下次打开还得再下」。
-            local id_part = name:match("^(%d+)_%d+_")
+            -- 目录里可能同时存在三代命名，只要 book_id 还在书架上就必须放行：
+            --   ① `<book_id>.jpg`（最早一代，无宽度后缀）
+            --   ② `<book_id>_<宽>.jpg`
+            --   ③ `<book_id>_<宽>[_<hash8>]_<layout>.jpg`（当前）
+            -- 用 `[_%.]` 而不是 `_%d+_`：旧判据匹配不到 ①，升级后会把在架书的
+            -- 旧封面当孤儿删掉（一次性闪白 + 白耗流量）。prune 还可能发生在
+            -- decorate 之前（books 还没带 cover_hash），所以不能只看新命名。
+            local id_part = name:match("^(%d+)[_%.]")
             if keep[name] or (id_part and ids[sanitize(id_part)]) then
                 kept = kept + 1
             else
