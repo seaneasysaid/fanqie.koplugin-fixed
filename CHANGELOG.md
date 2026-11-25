@@ -9,16 +9,18 @@
 - **宽幅表情图黑边裁剪失效**：真机 `800×166` 左右各 280px 黑边，旧扫描上限 `0.35w`=280 与旧保护阈值 `l+r >= 0.7w`（280+280=560）边界重合 → 恒判「内容不足 30%」永不裁剪。扫描上限放宽至 `0.45w`、判据改为 `cw < w*0.2` + 内容区采样；同步新增 `measurePics()` 在分页前解码写回有效尺寸 `_cw/_ch`，`singleImageBox()` 优先用裁后比例（否则 800×166 会排成 380×79 矮框，裁完又被压回），尺寸变化时经 `invalidateLayout()` 重排并保住滚动位置。
 - **封面缓存误删在读书**：`cover_cache.prune_orphans()` 的 `id_part = name:match("^(%d+)_%d+_")` 漏判 `<book_id>.jpg` 旧命名，在架书封面被当孤儿清掉后重下闪白。判据改为 `^(%d+)[_%.]`。
 - **慢设备段评超时**：`main.lua` 新增 `_prewarmShushanJwt()`，开书 3 秒后延迟 20 秒后台解算书山 JWT（6 天内有效跳过、10 分钟去重、timeout 300s），经 `set_source_field()` 写回父进程内存；段评详情 Async 超时 60→120s、登录测试 180s。
+- **极扁表情图黑边仍裁不掉（`800×80`，内容仅占 10%）**：真机表情图被 `expand` 补到 800 宽、左右各 360px 黑画布时，`detect_side_bars_impl()` 的两处中间判据叠加把它判死——扫描上限 `math.floor(w * 0.45)` = 360 恰等于真实补边宽（循环 `k < max_cols` 只扫到 359），且 `cw < w * 0.2`（80 < 160）先把内容判为不足。现将扫描上限改为 `math.floor((w - 16) / 2)`（永不越过内容中线）、内容下限只保留绝对值 `cw < 16`；防「整图黑底误裁」继续由内容区 5 列 `column_is_black()` 采样承担，纯黑底图仍返回 `0, 0`。此前「内容 ≥20% 宽」及 `cw < w * 0.2` 的中间判据由本条取代。
 
 ### ⚡ 优化
 - **PoW 解算加速 20～40s → 约 0.25s**：`shushan.lua` 快路径改直调 libcrypto `SHA256()`；修正 `ffi.load` 守卫（`cdata` → `cdata or userdata`，设备 luajit 实际返回 `userdata`，原守卫使快路径恒为死代码），热循环改为零分配（预填 `unsigned char[?]`、每迭代只写 4 字节计数器、直接比较 `_sha256_md[i]`）根治老 LuaJIT 的 GC 段错误，且仅 `cost == 1` 启用、其余回退原哈希链。
 - **死代码清理**：删除 `content.filename_safe()` / `content.utc_modified()` / `download.waitForRateLimit()`；`shushan` 一级/二级图片提取合并为 `extract_images(src)`；`content` 零宽字符清洗合并为 `gsub("\226\128[\139-\143\168-\174]", "")`（fengari 9 用例验证等价）。
 - **配图渲染去冗余**：`column_all_black` / `column_has_light` 合并为 `column_is_black`，删恒成立坐标判断；trim 分支提到比例探测前，无黑边图由 `_pic_sizes[path] == false` 直接跳过重复解码并复用缓存（附 `sw/sh` 尺寸校验，防文件被替换后裁错）；`_pendingImageUrls()` 去掉 `valid_image` 兼容回退、`_handleImageAction()` 合并两次 `io.open`；队列下载与点击补下统一走 `_afterPicDownloaded()`，后者补上此前缺失的「下载完成后重新测量并重排」。
+- **书山节点加回兜底地址**：`DEFAULT_NODES` 末尾恢复 `http://1.94.248.5:7001`，与 `113.44.163.166:7001` 同作末尾兜底；前面节点全挂时才会轮到，探测与慢节点降权逻辑不变（加回原因与实测记录写进节点池注释）。
 
 ### 🧪 离线验证
-- 新增 `_smoke_review_pics_valid.js`（fengari 沙箱真跑 `review_pics.lua`，22 项断言）、`_smoke_widget_pending_images.js`（4 场景 / 10 断言）、`_smoke_review_trim.js`（10 场景 / 11 断言），共 14 场景 43 断言全绿，覆盖 PNG/JPEG/GIF87a/GIF89a/WebP/BMP 文件头识别、HTML 错误页与半截 body 判坏、`valid_image` 三态返回、`_pendingImageUrls` 未命中/坏缓存/有效/二级回复四种入队路径、黑边对称性/占比/窄边/遇内容即停、内容区纯黑防误裁，以及裁后布局框高 79→263（框宽不变）。
+- 新增 `_smoke_review_pics_valid.js`（fengari 沙箱真跑 `review_pics.lua`，22 项断言）、`_smoke_widget_pending_images.js`（4 场景 / 10 断言）、`_smoke_review_trim.js`（10 场景 / 13 断言），共 14 场景 45 断言全绿，覆盖 PNG/JPEG/GIF87a/GIF89a/WebP/BMP 文件头识别、HTML 错误页与半截 body 判坏、`valid_image` 三态返回、`_pendingImageUrls` 未命中/坏缓存/有效/二级回复四种入队路径、黑边对称性/占比（含内容仅 10% 的 `800×80`）/窄边/遇内容即停、内容区纯黑防误裁，以及裁后布局框高 79→263（框宽不变）。
 - 同步修复失效回归脚本：`_smoke_shelf_fixes.js` 65/65、`_smoke_shushan_parareview.js` 20/20、`_smoke_pages_ctor.js` 7/7。
-- 该套测试在开发中抓出四个真实缺陷：`cover_cache.prune_orphans()` 漏判旧命名导致在架书封面误删（53/65 暴露）；`_smoke_review_trim.js` 场景 8（800×166 各 280px）暴露黑边扫描上限 `0.35w` 与 `0.7w` 保护阈值边界重合、宽幅表情图永不裁剪，已改为 `0.45w` + `cw < 0.2w` + 内容区采样；`_smoke_shushan_parareview.js` 因 mock 仍用 `opts.url` 而 v6 源码已改 `opts.path` 直接 LUA ERROR，段评分页早已失去回归保护，现改用 v6 格式 mock（`data.items` + `offset=` + JWT 缓存）；真机复测 + 二次 debug 又抓出无黑边图每帧重复解码、缓存复用不校验尺寸、点击补下后不重排三处，均已修。
+- 该套测试在开发中抓出五个真实缺陷：`cover_cache.prune_orphans()` 漏判旧命名导致在架书封面误删（53/65 暴露）；`_smoke_review_trim.js` 场景 8（800×166 各 280px）暴露黑边扫描上限 `0.35w` 与 `0.7w` 保护阈值边界重合、宽幅表情图永不裁剪，已改为 `0.45w` + `cw < 0.2w` + 内容区采样；`_smoke_shushan_parareview.js` 因 mock 仍用 `opts.url` 而 v6 源码已改 `opts.path` 直接 LUA ERROR，段评分页早已失去回归保护，现改用 v6 格式 mock（`data.items` + `offset=` + JWT 缓存）；真机复测 + 二次 debug 又抓出无黑边图每帧重复解码、缓存复用不校验尺寸、点击补下后不重排三处，均已修；三轮真机反馈的 `800×80` 极扁表情（左右各 360px）被 `w*0.2` 内容占比下限与 `0.45w` 扫描上限边界叠加判死，场景 4 补齐后已修。
 - 另发现 `_smoke_widget_reviewpics.js` 指向旧工作区 `2026-08-28-23-51-41/leko-reader`，实际未覆盖本插件的 widget，已由 `_smoke_widget_pending_images.js` 取代。
 
 ## [2.2.1-fixed.6.4] - 2026-11-20

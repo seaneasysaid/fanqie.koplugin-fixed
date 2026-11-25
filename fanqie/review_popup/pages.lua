@@ -573,12 +573,14 @@ local function is_black_color(c)
 end
 
 --- 检测左右整列纯黑的 expand 画布边条。
--- 判据：左右对称（差 ≤2px）、各 ≥4px、内容 ≥20% 宽且中心非纯黑。
--- 扫描上限必须大于常见补边宽（800 宽图可达 280/边），否则会截断在阈值上永不裁剪。
+-- 判据：左右对称（差 ≤2px）、各 ≥4px、裁完内容 ≥16px，且内容区采样列必须有非黑像素。
+-- 不设「内容占原宽比例」下限：expand 补边宽只取决于原图多窄，80×80 的表情被补到
+-- 800 宽时内容仅占 10%，按比例判会永远裁不掉——防黑底图交给采样判据。
+-- 扫描上限取 (w-16)/2：补边最宽可达近乎半宽（实测 800 宽图 360/边）。
 -- get_pixel(x, y) 由调用方提供，便于单测。
 local function detect_side_bars_impl(w, h, get_pixel)
     if w < 16 or h < 8 then return 0, 0 end
-    local max_cols = math.floor(w * 0.45)
+    local max_cols = math.floor((w - 16) / 2)
     local step_y = math.max(1, math.floor(h / 32))
     local function column_is_black(x)
         for y = 0, h - 1, step_y do
@@ -599,8 +601,8 @@ local function detect_side_bars_impl(w, h, get_pixel)
     local r = run(false)
     if l < 4 or r < 4 or math.abs(l - r) > 2 then return 0, 0 end
     local cw = w - l - r
-    -- 内容至少保留 20% 宽：再窄说明整图基本是黑底，裁了也没意义
-    if cw < 16 or cw < w * 0.2 then return 0, 0 end
+    -- 绝对下限：裁完不足 16px 就没有显示价值了
+    if cw < 16 then return 0, 0 end
     -- 内容区不能整块是黑的：均匀采样 5 列，全黑说明这不是画布补边，放弃
     for i = 1, 5 do
         if not column_is_black(l + math.floor(cw * i / 6)) then
