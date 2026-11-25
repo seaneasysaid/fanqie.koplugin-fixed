@@ -129,10 +129,9 @@ function M.file_exists(path)
     return false
 end
 
---- 判断一段字节是不是 KOReader 能渲染的位图（只看文件头，不解码）。
--- 段评图实际会出现 JPEG / WebP（HEIC 由服务端转码成 WebP）/ PNG / GIF / BMP。
--- 只挡 0 字节是不够的：CDN / WAF 可能回 200 + HTML 错误页，断流也可能留下
--- 半截 body，两者写盘后 file_exists 为真，模型层会当成「已缓存」永不重下。
+--- 判断一段字节是不是能渲染的位图（只看文件头，不解码）。
+-- 只挡 0 字节不够：CDN/WAF 会回 200 + HTML 错误页，断流会留半截 body，
+-- 写盘后 file_exists 为真就会被当成「已缓存」永不重下 → 永久灰框。
 function M.is_image_bytes(data)
     if type(data) ~= "string" or #data < 12 then return false end
     if data:sub(1, 8) == "\137PNG\r\n\26\n" then return true end          -- PNG

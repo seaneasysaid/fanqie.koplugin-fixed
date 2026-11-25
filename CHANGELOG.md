@@ -5,18 +5,20 @@
 ### 🐛 修复
 - **段评配图永久灰框**：`fetch_review_pic()` 原仅拦截 0 字节响应，HTTP 200 的 HTML 错误页与断流半截 body 会写入缓存；`file_exists()` 以能否 `io.open` 判定命中，坏文件因此永不重下。现写盘前经 `ReviewPics.is_image_bytes()` 校验 PNG/JPEG/GIF/WebP/BMP 文件头，改用同目录 `.tmp` + `os.rename()` 原子落盘；`_pendingImageUrls()` 与 `_handleImageAction()` 采用 `valid_image()` 的 `valid, exists` 双返回值，`exists and not valid` 时先 `os.remove()` 再入队。
 - **`[图片]` 占位符与二级回复配图缺失**：服务端 `content` 自带 `[图片]` 字面量且不在表情表内；`shushan.map_item()` 的 `replies` 映射只取 text/user/time/likes，丢弃了 `segments/images`。现 `content_builder.decode()` 用 `gsub("%s*%[图片%]%s*", " ")` 清理占位符（渲染层统一，三源受益），`map_item()` 补 `image_data_list = extract_images(r)`。
-- **表情图左右黑边**：根因是转码模板 `~tplv-1yzifmftcy-expand:800:0:0.webp` 的 `expand` 语义——原图窄于 800 即补纯黑画布（`shrink` 因 `tos-cn-i-*` 桶 403 不可用）。现 `pages.lua` 新增 `detect_side_bars_impl()`（左右对称整列纯黑，安全阀：各 ≥4px、左右差 ≤2px、合计 <70% 宽）与 `_renderTrimmed()`（按源偏移裁剪 + `scaleBlitBuffer()` 等比放大 + 白底居中）；无黑边返回 `nil` 回退原 `ImageWidget` 路径。
+- **表情图左右黑边**：根因是转码模板 `~tplv-1yzifmftcy-expand:800:0:0.webp` 的 `expand` 语义——原图窄于 800 即补纯黑画布（`shrink` 因 `tos-cn-i-*` 桶 403 不可用）。`pages.lua` 新增 `detect_side_bars_impl()`（左右对称整列纯黑，安全阀：各 ≥4px、左右差 ≤2px、内容 ≥20% 宽且采样列有非黑像素）与 `_renderTrimmed()`（按源偏移裁剪 + `scaleBlitBuffer()` 等比放大 + 白底居中）；无黑边返回 `nil` 回退原 `ImageWidget` 路径。
+- **宽幅表情图黑边裁剪失效**：真机 `800×166` 左右各 280px 黑边，旧扫描上限 `0.35w`=280 与旧保护阈值 `l+r >= 0.7w`（280+280=560）边界重合 → 恒判「内容不足 30%」永不裁剪。扫描上限放宽至 `0.45w`、判据改为 `cw < w*0.2` + 内容区采样；同步新增 `measurePics()` 在分页前解码写回有效尺寸 `_cw/_ch`，`singleImageBox()` 优先用裁后比例（否则 800×166 会排成 380×79 矮框，裁完又被压回），尺寸变化时经 `invalidateLayout()` 重排并保住滚动位置。
 - **封面缓存误删在读书**：`cover_cache.prune_orphans()` 的 `id_part = name:match("^(%d+)_%d+_")` 漏判 `<book_id>.jpg` 旧命名，在架书封面被当孤儿清掉后重下闪白。判据改为 `^(%d+)[_%.]`。
 - **慢设备段评超时**：`main.lua` 新增 `_prewarmShushanJwt()`，开书 3 秒后延迟 20 秒后台解算书山 JWT（6 天内有效跳过、10 分钟去重、timeout 300s），经 `set_source_field()` 写回父进程内存；段评详情 Async 超时 60→120s、登录测试 180s。
 
 ### ⚡ 优化
 - **PoW 解算加速 20～40s → 约 0.25s**：`shushan.lua` 快路径改直调 libcrypto `SHA256()`；修正 `ffi.load` 守卫（`cdata` → `cdata or userdata`，设备 luajit 实际返回 `userdata`，原守卫使快路径恒为死代码），热循环改为零分配（预填 `unsigned char[?]`、每迭代只写 4 字节计数器、直接比较 `_sha256_md[i]`）根治老 LuaJIT 的 GC 段错误，且仅 `cost == 1` 启用、其余回退原哈希链。
 - **死代码清理**：删除 `content.filename_safe()` / `content.utc_modified()` / `download.waitForRateLimit()`；`shushan` 一级/二级图片提取合并为 `extract_images(src)`；`content` 零宽字符清洗合并为 `gsub("\226\128[\139-\143\168-\174]", "")`（fengari 9 用例验证等价）。
+- **配图渲染去冗余**：`column_all_black` / `column_has_light` 合并为 `column_is_black`，删恒成立坐标判断；trim 分支提到比例探测前，无黑边图由 `_pic_sizes[path] == false` 直接跳过重复解码并复用缓存（附 `sw/sh` 尺寸校验，防文件被替换后裁错）；`_pendingImageUrls()` 去掉 `valid_image` 兼容回退、`_handleImageAction()` 合并两次 `io.open`；队列下载与点击补下统一走 `_afterPicDownloaded()`，后者补上此前缺失的「下载完成后重新测量并重排」。
 
 ### 🧪 离线验证
-- 新增 `_smoke_review_pics_valid.js`（fengari 沙箱真跑 `review_pics.lua`，22 项断言）、`_smoke_widget_pending_images.js`（4 场景 / 10 断言）、`_smoke_review_trim.js`（7 场景 / 7 断言），共 11 场景 39 断言全绿，覆盖 PNG/JPEG/GIF87a/GIF89a/WebP/BMP 文件头识别、HTML 错误页与半截 body 判坏、`valid_image` 三态返回、`_pendingImageUrls` 未命中/坏缓存/有效/二级回复四种入队路径、黑边对称性/占比/窄边/遇内容即停等保护分支。
+- 新增 `_smoke_review_pics_valid.js`（fengari 沙箱真跑 `review_pics.lua`，22 项断言）、`_smoke_widget_pending_images.js`（4 场景 / 10 断言）、`_smoke_review_trim.js`（10 场景 / 11 断言），共 14 场景 43 断言全绿，覆盖 PNG/JPEG/GIF87a/GIF89a/WebP/BMP 文件头识别、HTML 错误页与半截 body 判坏、`valid_image` 三态返回、`_pendingImageUrls` 未命中/坏缓存/有效/二级回复四种入队路径、黑边对称性/占比/窄边/遇内容即停、内容区纯黑防误裁，以及裁后布局框高 79→263（框宽不变）。
 - 同步修复失效回归脚本：`_smoke_shelf_fixes.js` 65/65、`_smoke_shushan_parareview.js` 20/20、`_smoke_pages_ctor.js` 7/7。
-- 该套测试在开发中抓出三个真实缺陷：`cover_cache.prune_orphans()` 漏判旧命名导致在架书封面误删（53/65 暴露）；`_smoke_review_trim.js` 场景 4 暴露黑边扫描上限 `floor(w*0.4)` 与 80% 阈值边界重合，已收紧为 0.3/0.7 双重保护；`_smoke_shushan_parareview.js` 因 mock 仍用 `opts.url` 而 v6 源码已改 `opts.path` 直接 LUA ERROR，段评分页早已失去回归保护，现改用 v6 格式 mock（`data.items` + `offset=` + JWT 缓存）。
+- 该套测试在开发中抓出四个真实缺陷：`cover_cache.prune_orphans()` 漏判旧命名导致在架书封面误删（53/65 暴露）；`_smoke_review_trim.js` 场景 8（800×166 各 280px）暴露黑边扫描上限 `0.35w` 与 `0.7w` 保护阈值边界重合、宽幅表情图永不裁剪，已改为 `0.45w` + `cw < 0.2w` + 内容区采样；`_smoke_shushan_parareview.js` 因 mock 仍用 `opts.url` 而 v6 源码已改 `opts.path` 直接 LUA ERROR，段评分页早已失去回归保护，现改用 v6 格式 mock（`data.items` + `offset=` + JWT 缓存）；真机复测 + 二次 debug 又抓出无黑边图每帧重复解码、缓存复用不校验尺寸、点击补下后不重排三处，均已修。
 - 另发现 `_smoke_widget_reviewpics.js` 指向旧工作区 `2026-08-28-23-51-41/leko-reader`，实际未覆盖本插件的 widget，已由 `_smoke_widget_pending_images.js` 取代。
 
 ## [2.2.1-fixed.6.4] - 2026-11-20

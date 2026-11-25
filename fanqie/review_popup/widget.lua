@@ -343,13 +343,7 @@ function ThoughtPopupWidget:_pendingImageUrls()
                 if path then
                     -- 命中判断必须验内容，不能只看文件在不在：错误页/半截图
                     -- 存在且非 0 字节，file_exists 为真就永远不进队列 → 永久灰框。
-                    local valid, exists
-                    if ReviewPics.valid_image then
-                        valid, exists = ReviewPics.valid_image(path)
-                    else
-                        valid = ReviewPics.file_exists(path)
-                        exists = valid
-                    end
+                    local valid, exists = ReviewPics.valid_image(path)
                     if exists and not valid then
                         -- 历史坏缓存：删掉，让本次重建重新排队下载
                         pcall(os.remove, path)
@@ -437,7 +431,7 @@ function ThoughtPopupWidget:_startImageDownloads()
             if gen ~= widget._img_gen then return end
             if ok then
                 widget._pages:invalidateImage(job.url)
-                widget:_queueImageRefresh()
+                widget:_afterPicDownloaded()
             end
             -- 无论成败都继续下一张：一张坏图不该挡住后面的
             step()
@@ -463,6 +457,15 @@ function ThoughtPopupWidget:_refreshImageArea()
     end)
 end
 
+--- 图片落盘后的统一收尾：重测有效尺寸，变化了标记重排，否则只重绘。
+-- 串行队列和点击补下都走这里，避免两条路径对「裁边后比例」处理不一致。
+function ThoughtPopupWidget:_afterPicDownloaded()
+    if not self._pages then return end
+    local ok_m, changed = pcall(self._pages.measurePics, self._pages, self.items)
+    if ok_m and changed then self._img_layout_dirty = true end
+    self:_queueImageRefresh()
+end
+
 --- 批量下载时的合并刷新：串行队列里每下一张都整页清缓存重绘，十几张就是
 --- 十几次全量重排（电纸书上很贵）。这里把同一窗口内的完成事件攒一次，
 --- 最多每 0.35s 重绘一回；点图单独下载时仍走 _refreshImageArea 立即生效。
@@ -477,7 +480,23 @@ function ThoughtPopupWidget:_queueImageRefresh()
     local function flush()
         widget._img_refresh_pending = false
         if gen ~= widget._img_gen then return end
-        if widget._scroll_container then widget:_refreshImageArea() end
+        if not widget._scroll_container then return end
+        -- 图片尺寸变了（裁边后比例不同）→ 必须重排，否则仍按旧矮框绘制
+        if widget._img_layout_dirty then
+            widget._img_layout_dirty = false
+            local off = widget._scroll_container.scroll_offset or 0
+            widget._restore_offset = off
+            -- 布局缓存不含图片尺寸，必须显式作废后重新 setContent 才会重排；
+            -- 只调 _buildLayout 只会重建容器，用的还是旧 boundaries。
+            pcall(widget._pages.invalidateLayout, widget._pages)
+            widget._pages:setContent(widget.items, widget.doc_font_name, widget.doc_font_size,
+                widget.doc_margins, widget.height_ratio, widget.contrast,
+                widget.doc_font_weight, widget.doc_font_gamma)
+            widget:_buildLayout()
+            widget:_refreshImageArea()
+            return
+        end
+        widget:_refreshImageArea()
     end
     local ok = pcall(function() UIManager:scheduleIn(0.35, flush) end)
     if not ok then flush() end
@@ -628,26 +647,22 @@ function ThoughtPopupWidget:_handleImageAction(piece, content_x, content_y)
         pcall(self.fetch_pic, pic.fetch or pic.url, path, function(ok)
             if ok then
                 self._pages:invalidateImage(pic.url)
-                self:_refreshImageArea()
+                self:_afterPicDownloaded()
             end
         end)
     end
 
-    -- 缓存文件存在不等于能解：0 字节残骸、HTML 错误页、半截图都要删掉重下。
-    -- 只看 size 会漏掉非 0 字节的坏内容，点开就是打不开的灰框。
-    if path then
-        local valid, exists = ReviewPics.valid_image(path)
-        if exists and not valid then
+    if not path then return end
+    -- 文件存在不等于能解：0 字节残骸、HTML 错误页、半截图都要删掉重下
+    local valid, exists = ReviewPics.valid_image(path)
+    if not (exists and valid) then
+        if exists then
             pcall(os.remove, path)
-            refetch()
             if Log and Log.info then Log.info("[段评] 配图缓存内容无效，已删除重下") end
-            return
+        elseif Log and Log.info then
+            Log.info("[段评] 图片尚未缓存，已触发下载")
         end
-    end
-
-    if not (path and ReviewPics.file_exists(path)) then
         refetch()
-        if Log and Log.info then Log.info("[段评] 图片尚未缓存，已触发下载") end
         return
     end
 

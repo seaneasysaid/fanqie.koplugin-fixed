@@ -154,8 +154,10 @@ local function singleImageBox(pic, text_w, viewport_h)
     if avail_w < 1 then avail_w = 1 end
     local half_h = math.max(1, math.floor((viewport_h or 0) * IMG_HALF_H_RATIO))
     local half_w = math.max(1, math.floor(text_w * IMG_HALF_W_RATIO))
-    local pw = tonumber(pic and pic.w) or 0
-    local ph = tonumber(pic and pic.h) or 0
+    -- 优先用「裁掉 expand 黑边后的有效尺寸」：否则 800×166 这类极宽图会按 4.8:1
+    -- 排成一条矮框，裁完内容又被迫缩回去，等于白裁。_cw/_ch 由 measurePics() 写入。
+    local pw = tonumber(pic and pic._cw) or tonumber(pic and pic.w) or 0
+    local ph = tonumber(pic and pic._ch) or tonumber(pic and pic.h) or 0
     if pw > 0 and ph > 0 then
         if ph >= pw then
             -- 竖图/方图：先定高（钳半个弹窗），宽按比例跟随
@@ -340,8 +342,20 @@ function PageRenderer:setContent(items, doc_font_name, doc_font_size, doc_margin
     end
 end
 
+--- 图片有效尺寸变化后强制重排：布局缓存按文本+字体的 key 命中，
+--- 尺寸不在 key 里，不清掉会一直复用旧几何（图仍被塞进矮框）。
+function PageRenderer:invalidateLayout()
+    self._bb_key = nil
+    if self._layout_cache and self._layout_cache.clear then
+        pcall(self._layout_cache.clear, self._layout_cache)
+    end
+end
+
 function PageRenderer:paginate()
     local t0 = now_ms()
+    -- 分页前先量图片有效尺寸：expand 补边的宽图必须按「内容比例」排版，
+    -- 否则框被排成 4.8:1 的矮条，渲染阶段裁了边也放不大。
+    self:measurePics(self.items)
     -- 设置里存的是对比度索引（默认 15），渲染要的是 gamma 值（默认 1.0）。
     -- 不换算会恒命中「高对比」→ 全篇多一层仿粗，段评比正文还黑。
     local gamma_value = FaceFactory.gammaIndexToValue(self.doc_font_gamma)
@@ -558,25 +572,25 @@ local function is_black_color(c)
     return (c.a or 0) < 16
 end
 
---- 检测左右两侧整列纯黑的边条（番茄 `expand` 转码模板补的画布）。
--- 只有「左右对称、都不小于 4px、合计不超过 80% 宽」才认，避免把内容本身
--- 的黑边当画布裁掉。get_pixel(x, y) 由调用方提供，便于单测。
+--- 检测左右整列纯黑的 expand 画布边条。
+-- 判据：左右对称（差 ≤2px）、各 ≥4px、内容 ≥20% 宽且中心非纯黑。
+-- 扫描上限必须大于常见补边宽（800 宽图可达 280/边），否则会截断在阈值上永不裁剪。
+-- get_pixel(x, y) 由调用方提供，便于单测。
 local function detect_side_bars_impl(w, h, get_pixel)
     if w < 16 or h < 8 then return 0, 0 end
-    local max_cols = math.floor(w * 0.35)
+    local max_cols = math.floor(w * 0.45)
     local step_y = math.max(1, math.floor(h / 32))
+    local function column_is_black(x)
+        for y = 0, h - 1, step_y do
+            if not is_black_color(get_pixel(x, y)) then return false end
+        end
+        return true
+    end
     local function run(from_left)
         local n = 0
         for k = 0, max_cols - 1 do
             local x = from_left and k or (w - 1 - k)
-            local black = true
-            for y = 0, h - 1, step_y do
-                if not is_black_color(get_pixel(x, y)) then
-                    black = false
-                    break
-                end
-            end
-            if not black then break end
+            if not column_is_black(x) then break end
             n = n + 1
         end
         return n
@@ -584,9 +598,16 @@ local function detect_side_bars_impl(w, h, get_pixel)
     local l = run(true)
     local r = run(false)
     if l < 4 or r < 4 or math.abs(l - r) > 2 then return 0, 0 end
-    -- 内容至少保留 30% 宽：超过就不认，避免把「内容本身就是黑底」的图裁空
-    if l + r >= w * 0.7 then return 0, 0 end
-    return l, r
+    local cw = w - l - r
+    -- 内容至少保留 20% 宽：再窄说明整图基本是黑底，裁了也没意义
+    if cw < 16 or cw < w * 0.2 then return 0, 0 end
+    -- 内容区不能整块是黑的：均匀采样 5 列，全黑说明这不是画布补边，放弃
+    for i = 1, 5 do
+        if not column_is_black(l + math.floor(cw * i / 6)) then
+            return l, r
+        end
+    end
+    return 0, 0
 end
 
 --- 把一张图解码、等比缩进 box_w × box_h（contain，白底居中），返回整块位图。
@@ -599,6 +620,21 @@ function PageRenderer:_renderImageBB(pic, box_w, box_h)
     if not ReviewPics.file_exists(path) then
         self._img_missing[path] = true
         return nil
+    end
+
+    local bbtype = Screen:isColorEnabled() and Blitbuffer.TYPE_BBRGB32 or Blitbuffer.TYPE_BB8
+
+    -- expand 转码模板会在左右补纯黑画布，直接 contain 会把内容缩得只剩中间一条。
+    -- 探到对称黑边就裁掉、再按内容比例放大；只动绘制，不改分页尺寸。
+    -- 放在比例探测之前：命中这条路时不再白算一遍 contain 参数。
+    -- 已判定无黑边的图直接跳过，免得每次渲染都为检测多解码一遍。
+    local trim_cached = self._pic_sizes and self._pic_sizes[path]
+    if ok_RenderImage and RenderImage and trim_cached ~= false then
+        local ok_trim, trimmed = pcall(self._renderTrimmed, self, path, box_w, box_h, bbtype)
+        if ok_trim and trimmed then
+            self._drawn_images = (self._drawn_images or 0) + 1
+            return trimmed
+        end
     end
 
     -- 真实比例优先（读文件头），接口字段次之，都没有就填满框
@@ -616,18 +652,6 @@ function PageRenderer:_renderImageBB(pic, box_w, box_h)
     local rh = math.max(1, math.floor(dh * scale + 0.5))
     local ox = math.max(0, math.floor((box_w - rw) / 2))
     local oy = math.max(0, math.floor((box_h - rh) / 2))
-
-    local bbtype = Screen:isColorEnabled() and Blitbuffer.TYPE_BBRGB32 or Blitbuffer.TYPE_BB8
-
-    -- expand 转码模板会在左右补纯黑画布，直接 contain 会把内容缩得只剩中间一条。
-    -- 探到对称黑边就裁掉、再按内容比例放大；只动绘制，不改分页尺寸。
-    if ok_RenderImage and RenderImage then
-        local ok_trim, trimmed = pcall(self._renderTrimmed, self, path, box_w, box_h, bbtype)
-        if ok_trim and trimmed then
-            self._drawn_images = (self._drawn_images or 0) + 1
-            return trimmed
-        end
-    end
 
     local bb = Blitbuffer.new(box_w, box_h, bbtype)
     bb:fill(Blitbuffer.COLOR_WHITE)
@@ -680,10 +704,25 @@ function PageRenderer:_renderTrimmed(path, box_w, box_h, bbtype)
     local src = RenderImage:renderImageFile(path, false)
     if not src then return nil end
     local sw, sh = src:getWidth(), src:getHeight()
-    local l, r = detect_side_bars_impl(sw, sh, function(x, y)
-        return src:getPixel(x, y)
-    end)
-    if l == 0 and r == 0 then
+    -- 布局阶段测过就直接复用（含「无黑边」的否定结果，免得每次渲染都重扫全图）
+    local cached = self._pic_sizes and self._pic_sizes[path]
+    if cached == false then
+        src:free()
+        return nil
+    end
+    local l, r
+    if cached and cached.sw == sw and cached.sh == sh then
+        l, r = cached.l, cached.r
+    else
+        l, r = detect_side_bars_impl(sw, sh, function(x, y)
+            return src:getPixel(x, y)
+        end)
+        self._pic_sizes = self._pic_sizes or {}
+        self._pic_sizes[path] = (l > 0)
+            and { l = l, r = r, sw = sw, sh = sh, cw = sw - l - r, ch = sh }
+            or false
+    end
+    if l == 0 then
         src:free()
         return nil
     end
@@ -710,6 +749,64 @@ function PageRenderer:_renderTrimmed(path, box_w, box_h, bbtype)
     return bb
 end
 
+--- 量一张「已下载」图片的有效尺寸：解码一次，检测左右 expand 黑边。
+-- 结果按 path 缓存（含「无黑边」的否定结果），布局阶段反复调用也不会重复解码。
+-- 返回 { l, r, sw, sh, cw, ch }；未下载 / 解码失败 / 无黑边时返回 nil。
+function PageRenderer:_measurePic(pic)
+    if type(pic) ~= "table" then return nil end
+    local path = self:_imagePath(pic)
+    if not path or self._img_missing[path] then return nil end
+    if not (ok_RenderImage and RenderImage) then return nil end
+    self._pic_sizes = self._pic_sizes or {}
+    local hit = self._pic_sizes[path]
+    if hit ~= nil then return hit or nil end
+    local ok, res = pcall(function()
+        local src = RenderImage:renderImageFile(path, false)
+        if not src then return false end
+        local sw, sh = src:getWidth(), src:getHeight()
+        local l, r = detect_side_bars_impl(sw, sh, function(x, y)
+            return src:getPixel(x, y)
+        end)
+        src:free()
+        if l == 0 and r == 0 then return false end
+        return { l = l, r = r, sw = sw, sh = sh, cw = sw - l - r, ch = sh }
+    end)
+    local val = (ok and res) or false
+    self._pic_sizes[path] = val
+    return val or nil
+end
+
+--- 布局前把裁边后的有效宽高写进 pic（_cw/_ch），返回是否有尺寸变化。
+-- 粗筛只测较宽的横图（expand 产物宽 800），普通图跳过，避免打开时整屏解码。
+function PageRenderer:measurePics(items)
+    if type(items) ~= "table" then return false end
+    local changed = false
+    local function one(p)
+        if type(p) ~= "table" then return end
+        local pw, ph = tonumber(p.w) or 0, tonumber(p.h) or 0
+        if not (pw >= 600 and pw > ph * 1.2) then return end
+        local m = self:_measurePic(p)
+        if m and m.cw and m.ch and m.cw > 0 and m.ch > 0 then
+            if p._cw ~= m.cw or p._ch ~= m.ch then changed = true end
+            p._cw, p._ch = m.cw, m.ch
+        elseif p._cw or p._ch then
+            p._cw, p._ch = nil, nil
+            changed = true
+        end
+    end
+    -- 只测单图：网格格子是固定正方形，按内容比例排版没有意义，
+    -- 白白多解码一遍（打开弹窗时一屏十几张图会明显拖慢）。
+    for _, it in ipairs(items) do
+        if type(it.pics) == "table" and #it.pics == 1 then one(it.pics[1]) end
+        if type(it.replies) == "table" then
+            for _, rp in ipairs(it.replies) do
+                if type(rp.pics) == "table" and #rp.pics == 1 then one(rp.pics[1]) end
+            end
+        end
+    end
+    return changed
+end
+
 --- 图片位图（按 path + 框尺寸缓存；解码一次，滚动时反复 blit）
 function PageRenderer:_getImageBB(pic, box_w, box_h)
     if not self.pic_dir then return nil end
@@ -732,6 +829,8 @@ function PageRenderer:invalidateImage(url)
     if not name or not self.pic_dir then return end
     local path = self.pic_dir .. "/" .. name
     self._img_missing[path] = nil
+    -- 图片重下后尺寸可能变（之前是坏文件），测量结果一并作废
+    if self._pic_sizes then self._pic_sizes[path] = nil end
 end
 
 function PageRenderer:_freePieceCache()
