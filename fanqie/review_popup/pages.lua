@@ -549,6 +549,46 @@ function PageRenderer:_imagePath(pic)
     return self.pic_dir .. "/" .. name
 end
 
+--- 颜色是否接近纯黑（兼容 8bpp 灰度与 RGB32 两种位图）。
+local function is_black_color(c)
+    if not c then return false end
+    if c.r ~= nil then
+        return c.r < 16 and c.g < 16 and c.b < 16
+    end
+    return (c.a or 0) < 16
+end
+
+--- 检测左右两侧整列纯黑的边条（番茄 `expand` 转码模板补的画布）。
+-- 只有「左右对称、都不小于 4px、合计不超过 80% 宽」才认，避免把内容本身
+-- 的黑边当画布裁掉。get_pixel(x, y) 由调用方提供，便于单测。
+local function detect_side_bars_impl(w, h, get_pixel)
+    if w < 16 or h < 8 then return 0, 0 end
+    local max_cols = math.floor(w * 0.35)
+    local step_y = math.max(1, math.floor(h / 32))
+    local function run(from_left)
+        local n = 0
+        for k = 0, max_cols - 1 do
+            local x = from_left and k or (w - 1 - k)
+            local black = true
+            for y = 0, h - 1, step_y do
+                if not is_black_color(get_pixel(x, y)) then
+                    black = false
+                    break
+                end
+            end
+            if not black then break end
+            n = n + 1
+        end
+        return n
+    end
+    local l = run(true)
+    local r = run(false)
+    if l < 4 or r < 4 or math.abs(l - r) > 2 then return 0, 0 end
+    -- 内容至少保留 30% 宽：超过就不认，避免把「内容本身就是黑底」的图裁空
+    if l + r >= w * 0.7 then return 0, 0 end
+    return l, r
+end
+
 --- 把一张图解码、等比缩进 box_w × box_h（contain，白底居中），返回整块位图。
 -- 返回 nil 表示「文件还没有 / 解不出来」→ 调用方画占位框。
 function PageRenderer:_renderImageBB(pic, box_w, box_h)
@@ -578,6 +618,17 @@ function PageRenderer:_renderImageBB(pic, box_w, box_h)
     local oy = math.max(0, math.floor((box_h - rh) / 2))
 
     local bbtype = Screen:isColorEnabled() and Blitbuffer.TYPE_BBRGB32 or Blitbuffer.TYPE_BB8
+
+    -- expand 转码模板会在左右补纯黑画布，直接 contain 会把内容缩得只剩中间一条。
+    -- 探到对称黑边就裁掉、再按内容比例放大；只动绘制，不改分页尺寸。
+    if ok_RenderImage and RenderImage then
+        local ok_trim, trimmed = pcall(self._renderTrimmed, self, path, box_w, box_h, bbtype)
+        if ok_trim and trimmed then
+            self._drawn_images = (self._drawn_images or 0) + 1
+            return trimmed
+        end
+    end
+
     local bb = Blitbuffer.new(box_w, box_h, bbtype)
     bb:fill(Blitbuffer.COLOR_WHITE)
 
@@ -621,6 +672,41 @@ function PageRenderer:_renderImageBB(pic, box_w, box_h)
     end
     -- 记录「本弹窗真的往屏幕上画过图」：关窗时要全刷清残影（widget.lua）。
     self._drawn_images = (self._drawn_images or 0) + 1
+    return bb
+end
+
+--- 裁掉 expand 模板的左右黑边后再 contain。没有黑边就返回 nil，交回 ImageWidget。
+function PageRenderer:_renderTrimmed(path, box_w, box_h, bbtype)
+    local src = RenderImage:renderImageFile(path, false)
+    if not src then return nil end
+    local sw, sh = src:getWidth(), src:getHeight()
+    local l, r = detect_side_bars_impl(sw, sh, function(x, y)
+        return src:getPixel(x, y)
+    end)
+    if l == 0 and r == 0 then
+        src:free()
+        return nil
+    end
+
+    local cw = sw - l - r
+    local scale = math.min(box_w / cw, box_h / sh)
+    local tw = math.max(1, math.floor(cw * scale + 0.5))
+    local th = math.max(1, math.floor(sh * scale + 0.5))
+
+    -- blitFrom 带源偏移：只把 [l, 0, cw, sh] 这段拷进新缓冲，再整体缩放。
+    local crop = Blitbuffer.new(cw, sh, src:getType())
+    crop:blitFrom(src, 0, 0, l, 0, cw, sh)
+    src:free()
+    local scaled = RenderImage:scaleBlitBuffer(crop, tw, th)   -- 默认会 free crop
+    if not scaled then return nil end
+
+    local bb = Blitbuffer.new(box_w, box_h, bbtype)
+    bb:fill(Blitbuffer.COLOR_WHITE)
+    local ox = math.max(0, math.floor((box_w - tw) / 2))
+    local oy = math.max(0, math.floor((box_h - th) / 2))
+    bb:blitFrom(scaled, ox, oy, 0, 0,
+        math.min(tw, scaled:getWidth()), math.min(th, scaled:getHeight()))
+    if scaled.free then scaled:free() end
     return bb
 end
 
@@ -767,5 +853,8 @@ function PageRenderer:freeContentCaches()
     self.layout = nil
     self.boundaries = nil
 end
+
+-- 黑边检测是纯逻辑（像素来源由 getter 注入），暴露给单测直接验证。
+PageRenderer._test.detect_side_bars = detect_side_bars_impl
 
 return PageRenderer

@@ -340,9 +340,28 @@ function ThoughtPopupWidget:_pendingImageUrls()
                 -- 目录本身，file_exists(目录) 若为真就永远不进队列，
                 -- 若为假则每次重建都重试一次必然失败的下载
                 local path = name and (self.pic_dir .. "/" .. name)
-                if path and not ReviewPics.file_exists(path) then
-                    -- url 作去重与缓存名，fetch 才是真正下载地址
-                    out[#out + 1] = { url = url, fetch = p.fetch or url, path = path }
+                if path then
+                    -- 命中判断必须验内容，不能只看文件在不在：错误页/半截图
+                    -- 存在且非 0 字节，file_exists 为真就永远不进队列 → 永久灰框。
+                    local valid, exists
+                    if ReviewPics.valid_image then
+                        valid, exists = ReviewPics.valid_image(path)
+                    else
+                        valid = ReviewPics.file_exists(path)
+                        exists = valid
+                    end
+                    if exists and not valid then
+                        -- 历史坏缓存：删掉，让本次重建重新排队下载
+                        pcall(os.remove, path)
+                        if Log and Log.info then
+                            Log.info("[段评] 配图缓存内容无效，已删除重下: %s",
+                                tostring(path))
+                        end
+                    end
+                    if not valid then
+                        -- url 作去重与缓存名，fetch 才是真正下载地址
+                        out[#out + 1] = { url = url, fetch = p.fetch or url, path = path }
+                    end
                 end
             end
         end
@@ -614,18 +633,14 @@ function ThoughtPopupWidget:_handleImageAction(piece, content_x, content_y)
         end)
     end
 
-    -- 0 字节是下载被中断留下的残骸：留着也解不出图，删掉重下一次
-    if path and ReviewPics.file_exists(path) then
-        local f = io.open(path, "rb")
-        local size = 0
-        if f then
-            size = f:seek("end") or 0
-            f:close()
-        end
-        if size <= 0 then
+    -- 缓存文件存在不等于能解：0 字节残骸、HTML 错误页、半截图都要删掉重下。
+    -- 只看 size 会漏掉非 0 字节的坏内容，点开就是打不开的灰框。
+    if path then
+        local valid, exists = ReviewPics.valid_image(path)
+        if exists and not valid then
             pcall(os.remove, path)
             refetch()
-            if Log and Log.info then Log.info("[段评] 配图是 0 字节残骸，已删除重下") end
+            if Log and Log.info then Log.info("[段评] 配图缓存内容无效，已删除重下") end
             return
         end
     end

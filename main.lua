@@ -910,13 +910,28 @@ function FanQiePlugin:_displayParaReviewDetail(index, total_reviews, ok, result,
             Async.run(function()
                 local c = Client:new(plugin_ref.settings)
                 local data = c:get_binary(url)
-                if type(data) ~= "string" or #data == 0 then
-                    error("empty image body", 0)
+                -- get_binary 只保证 2xx，不保证内容是图：CDN/WAF 会回 200 + HTML
+                -- 错误页，断流也可能给半截 body。这类坏内容一旦落盘，file_exists
+                -- 为真就永远不会重下（永久灰框），所以写盘前必须验文件头。
+                if not (ReviewPics and ReviewPics.is_image_bytes
+                    and ReviewPics.is_image_bytes(data)) then
+                    error("invalid image body", 0)
                 end
-                local f = io.open(path, "wb")
-                if not f then error("cannot open " .. tostring(path), 0) end
-                f:write(data)
+                -- 原子写入：先写同目录 .tmp，成功后才 rename 到目标。
+                -- 子进程中途被杀也只会留下 .tmp，目标路径不会出现半截图。
+                local tmp = path .. ".tmp"
+                local f = io.open(tmp, "wb")
+                if not f then error("cannot open " .. tostring(tmp), 0) end
+                local ok_write = f:write(data)
                 f:close()
+                if not ok_write then
+                    pcall(os.remove, tmp)
+                    error("write image failed", 0)
+                end
+                if not os.rename(tmp, path) then
+                    pcall(os.remove, tmp)
+                    error("rename image failed", 0)
+                end
                 return true
             end, function(ok)
                 finish(ok == true)

@@ -129,6 +129,37 @@ function M.file_exists(path)
     return false
 end
 
+--- 判断一段字节是不是 KOReader 能渲染的位图（只看文件头，不解码）。
+-- 段评图实际会出现 JPEG / WebP（HEIC 由服务端转码成 WebP）/ PNG / GIF / BMP。
+-- 只挡 0 字节是不够的：CDN / WAF 可能回 200 + HTML 错误页，断流也可能留下
+-- 半截 body，两者写盘后 file_exists 为真，模型层会当成「已缓存」永不重下。
+function M.is_image_bytes(data)
+    if type(data) ~= "string" or #data < 12 then return false end
+    if data:sub(1, 8) == "\137PNG\r\n\26\n" then return true end          -- PNG
+    if data:sub(1, 3) == "\255\216\255" then return true end               -- JPEG
+    if data:sub(1, 6) == "GIF87a" or data:sub(1, 6) == "GIF89a" then
+        return true                                                       -- GIF
+    end
+    if data:sub(1, 4) == "RIFF" and data:sub(9, 12) == "WEBP" then
+        return true                                                       -- WebP
+    end
+    if data:sub(1, 2) == "BM" then return true end                         -- BMP
+    return false
+end
+
+--- 文件存在且内容确实是位图。缓存命中判断应该用它，而不是 file_exists。
+-- 返回 valid, exists：exists=false 表示文件不存在（调用方直接去下载）；
+-- exists=true 而 valid=false 表示历史坏缓存（错误页/半截图），应删除重下。
+function M.valid_image(path)
+    if type(path) ~= "string" or path == "" then return false, false end
+    local f = io.open(path, "rb")
+    if not f then return false, false end
+    local head = f:read(12)
+    f:close()
+    if M.is_image_bytes(head) then return true, true end
+    return false, true
+end
+
 --- 一条段评 → 配图数组，统一结构 { url, fetch, w, h, displayable }。
 --
 -- 两条来源：
