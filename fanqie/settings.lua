@@ -45,15 +45,17 @@ local defaults = {
     download_dir = "",
     config_loaded = true,
     -- Book source management
+    -- 默认顺序：书山 → 官方 → 知秋。order 用 1/2/3 而非旧 3/4/5，
+    -- 与设备现有配置归一化后的值一致；新装/迁移到此顺序时不再出现并列。
     sources = {
         official = {
             enabled = true,
-            order = 3,
+            order = 2,
             rate_limit = { max_requests = 0, window_seconds = 0 },
         },
         zhiqiu = {
             enabled = true,
-            order = 4,
+            order = 3,
             server_url = "https://fq.vv9v.cn",
             token = "",          -- x-sec-token 共享Token（可留空，由三件套自动获取）
             token_minted_at = "",-- unix time when token was minted (~3天有效期)
@@ -70,7 +72,7 @@ local defaults = {
             -- 阅读 app 登录书山并获得该台设备的真实 Android ID 才能读正文，且
             -- 伪造设备码会触发软拦截/曾致封号，故必须显式启用并手动填写。
             enabled = false,
-            order = 5,
+            order = 1,
             server_url = "https://v2.vossc.com",
             email = "",          -- 书山账号邮箱
             password = "",       -- 书山账号密码
@@ -231,14 +233,22 @@ function Settings:set_source_field(source_id, key, value)
     self:flush()
 end
 
--- Swap a source's order with its neighbor. direction: -1 = up, +1 = down.
+-- Move a source one slot up (-1) or down (+1) in the displayed order.
+-- 修复：旧实现交换两个 cfg 的 order 值，当两源 order 并列（如 Kindle 上 shushan
+-- 与 zhiqiu 都=1）时交换 1↔1 等于没动，"上移"看似失效。新实现交换列表项位置，
+-- 并列时用 id 字典序做稳定 tie-break（pairs 遍历无序 + table.sort 不稳定会让
+-- 并列项顺序每次都变），移动后把整表重新编号为唯一连续的 1..n，顺带归一化历史
+-- 重复/缺号，保证之后每次移动都可靠。
 function Settings:move_source(source_id, direction)
     local sources = self:get("sources", {})
     local ordered = {}
     for id, cfg in pairs(sources) do
         table.insert(ordered, { id = id, order = cfg.order or 999 })
     end
-    table.sort(ordered, function(a, b) return a.order < b.order end)
+    table.sort(ordered, function(a, b)
+        if a.order == b.order then return a.id < b.id end
+        return a.order < b.order
+    end)
     local idx = nil
     for i, item in ipairs(ordered) do
         if item.id == source_id then idx = i break end
@@ -246,18 +256,15 @@ function Settings:move_source(source_id, direction)
     if not idx then return false end
     local target = idx + direction
     if target < 1 or target > #ordered then return false end
-    local a, b = ordered[idx], ordered[target]
-    local cfg_a = sources[a.id]
-    local cfg_b = sources[b.id]
-    if cfg_a and cfg_b then
-        cfg_a.order, cfg_b.order = cfg_b.order, cfg_a.order
-        sources[a.id] = cfg_a
-        sources[b.id] = cfg_b
-        self:set("sources", sources)
-        self:flush()
-        return true
+    -- 交换位置，而不是交换 order 数值（重复 order 时后者无效果）
+    ordered[idx], ordered[target] = ordered[target], ordered[idx]
+    for i, item in ipairs(ordered) do
+        local cfg = sources[item.id]
+        if cfg then cfg.order = i end
     end
-    return false
+    self:set("sources", sources)
+    self:flush()
+    return true
 end
 
 -- Compute a simple hash of the config table for change detection.

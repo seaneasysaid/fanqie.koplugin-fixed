@@ -152,7 +152,9 @@ function SourceManager.get_active_sources(settings)
         end
     end
     table.sort(list, function(a, b)
-        return (a.config.order or 999) < (b.config.order or 999)
+        local oa, ob = a.config.order or 999, b.config.order or 999
+        if oa == ob then return a.id < b.id end
+        return oa < ob
     end)
     return list
 end
@@ -167,7 +169,9 @@ function SourceManager.get_all_sources(settings)
         table.insert(list, { id = source_id, config = cfg, meta = meta })
     end
     table.sort(list, function(a, b)
-        return (a.config.order or 999) < (b.config.order or 999)
+        local oa, ob = a.config.order or 999, b.config.order or 999
+        if oa == ob then return a.id < b.id end
+        return oa < ob
     end)
     return list
 end
