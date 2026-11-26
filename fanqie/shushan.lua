@@ -796,6 +796,25 @@ function ShuShan.ensure_api_key(client, settings, force)
     return result
 end
 
+-- 书山服务端会在部分章节正文末尾追加一段推广（实测 2026-11-27）：
+--   📢书山提醒您：注册账户30天不使用…防失联请收藏：书山小说网：https://fb.shushan.vip
+-- 按「整段 + 双特征」剔除：以 📢书山提醒 开头，且含 shushan.vip 或 书山小说网。
+-- 两段同时满足才删，避免误伤正文里恰好提到书山的句子。广告恒在末段，
+-- 剔除发生在段评行号映射之前，不影响 paragraph_id 与非空段落的对齐。
+local function strip_tail_ad(content)
+    if type(content) ~= "string" then return content end
+    local lines = {}
+    for line in (content .. "\n"):gmatch("(.-)\n") do
+        local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+        local is_ad = trimmed:find("📢书山提醒", 1, true) == 1
+            and (trimmed:find("shushan.vip", 1, true) ~= nil
+                 or trimmed:find("书山小说网", 1, true) ~= nil)
+        if not is_ad then lines[#lines + 1] = line end
+    end
+    if #lines == 0 then return content end  -- 极端：全被判广告则原样返回，宁可留着
+    return table.concat(lines, "\n")
+end
+
 --  Content — POST /content for one chapter.
 -- book_id/item_id come from the catalog. Returns {content=string, ...}.
 function ShuShan.get_content(client, settings, book_id, item_id, opts)
@@ -854,6 +873,8 @@ function ShuShan.get_content(client, settings, book_id, item_id, opts)
             tostring(cid), tostring(item_id),
             tostring(data.content or obj.msg or obj.error or "")))
     end
+    -- 剔除服务端追加的推广尾段（必须在段评非空行映射之前）
+    content = strip_tail_ad(content)
 
     -- 实测服务端直接返回明文 UTF-8 正文，无需解密。
     -- 若未来返回 base64 密文，需在此接入 AES-CBC 解密（key/iv 见顶部常量）；

@@ -36,7 +36,9 @@ local function status_text(book)
     return _("未开始")
 end
 
--- 封面网格布局：比例 0.68 / gutter 6 / 阴影 3 / 圆角 5 / 标题行 22 / 副行 16
+-- 封面网格布局：比例 0.75(3:4) / 横向gutter 7 / 纵向gutter 3 / 阴影 3 / 圆角 5 / 标题行 18 / 副行 14
+-- 间距与文字行高度压缩，省下的垂直空间全部给封面；比例 3:4 不变。
+-- 横竖 gutter 分开：Kindle 上左右留白太紧，横向放宽到 7，纵向仍压到 3 不吃掉封面高度。
 
 local GRID_COLS = 4
 local GRID_ROWS = 3
@@ -55,15 +57,16 @@ end
 
 local function cellCardMetrics(cell_w, cell_h)
     local size_scale = shelfSizeScale()
-    local gutter = math.max(1, math.floor(6 * size_scale))
+    local gutter_x = math.max(1, math.floor(7 * size_scale))
+    local gutter_y = math.max(1, math.floor(3 * size_scale))
     local shadow = math.max(1, math.floor(3 * size_scale))
-    local title_gap = math.max(1, math.floor(4 * size_scale))
-    local title_h = math.max(1, math.floor(22 * size_scale))
-    local sub_gap = math.max(1, math.floor(2 * size_scale))
-    local sub_h = math.max(1, math.floor(16 * size_scale))
+    local title_gap = math.max(1, math.floor(2 * size_scale))
+    local title_h = math.max(1, math.floor(18 * size_scale))
+    local sub_gap = math.max(1, math.floor(1 * size_scale))
+    local sub_h = math.max(1, math.floor(14 * size_scale))
     local border = Size.border.thin
-    local max_cw = math.max(1, cell_w - 2 * gutter)
-    local max_ch = math.max(1, cell_h - 2 * gutter - title_gap - title_h - sub_gap - sub_h)
+    local max_cw = math.max(1, cell_w - 2 * gutter_x)
+    local max_ch = math.max(1, cell_h - 2 * gutter_y - title_gap - title_h - sub_gap - sub_h)
     -- 卡片锁定番茄封面原图的 3:4（0.75）。原先用 0.68，等于把 3:4 的封面
     -- 横向压掉约 10%（方形封面的书要压 30%），人像变瘦、构图走样，
     -- 观感上就像"换了张封面"。ImageWidget 是直接拉伸不裁切的，卡片比例
@@ -80,7 +83,8 @@ local function cellCardMetrics(cell_w, cell_h)
     local radius = math.min(math.max(2, math.floor(5 * size_scale)),
         math.floor(math.min(card_w, card_h) / 2))
     return {
-        gutter = gutter,
+        gutter_x = gutter_x,
+        gutter_y = gutter_y,
         shadow = shadow,
         title_gap = title_gap,
         title_h = title_h,

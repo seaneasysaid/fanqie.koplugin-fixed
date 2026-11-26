@@ -1,5 +1,18 @@
 # 项目更新日记
 
+## [2.2.1-fixed.6.5] - 2026-11-27（小迭代）
+
+### 🐛 修复
+- **书山正文末尾广告**：服务端把 `📢书山提醒您：…防失联请收藏：书山小说网：https://fb.shushan.vip` 明文塞在正文最后一段。`shushan.lua` 新增 `strip_tail_ad()`，在段评非空行映射**之前**按「整段行首 `📢书山提醒` 且含 `shushan.vip` 或 `书山小说网`」双特征剔除——两条件缺一不可，正文里提到书山或网址不会误删。广告是独立末段、无段评锚点，删掉不影响 `paragraph_id` 对齐；整章都被判广告时原样返回保底。已缓存的旧章节命中缓存不再走 `get_content`，需重开章节或清缓存才会生效（本次已清理两台设备 5 章旧缓存）。
+
+### ⚡ 优化
+- **书架封面紧凑化**：`shelf_view.lua` 压掉格子内约 15px 的固定消耗——`gutter` 6→3、标题行 22→18（gap 4→2）、进度行 16→14（gap 2→1），省下的垂直空间全给封面；随后把横竖共用的 `gutter` 拆成 `gutter_x`（左右留白，Kindle 上偏紧，3→5→7）与 `gutter_y`（上下仍 3），只放宽左右不吃掉刚拿到的封面高度。比例 `aspect = 0.75`（3:4）与 4 列×3 行/每页 12 本全程不变；典型格子 237×180 下封面由 93×124 → 104×139（宽 +11.8%、高 +12.1%、面积 +25.4%），小屏格子受益更高（最高 +34%）。顺手修正第 39 行写错的「比例 0.68」注释。
+- **书源默认顺序与上下移**：两设备默认改为书山→官方→知秋。原 `move_source()` 交换两个源的 order 数值，Kindle 上 `shushan.order=1` 与 `zhiqiu.order=1` 撞车导致交换 1↔1 无效、书山「上移」看似失灵。现改为交换列表项**位置**、并列用 id 字典序 tie-break、移动后整表重编号为唯一连续的 `1..n`（顺带归一化历史重复/缺号）；`sources.lua` 的 `get_active_sources()` / `get_all_sources()` 排序补同样的 tie-break，重复 order 下菜单显示不再飘。
+
+### 🧪 离线验证
+- 新增 `_smoke_shelf_compact.js`（33 断言：`aspect` 与网格结构守恒、各尺寸卡片面积严格增大、横向 `gutter_x` 7 vs 5 vs 3 时封面高度不缩水）、`_smoke_shushan_tail_ad.js`（15 断言 = 4 静态 + 11 功能，覆盖真实广告样本、夹在中间的多段、双特征防误删正文、幂等与非字符串入参）、`_smoke_source_order.js`（4 场景：默认顺序、重复 order 下能上下移、移动后 order 唯一连续、菜单稳定排序）。
+- 回归全绿：`_smoke_shelf_view.js` 15/15、`_smoke_shelf_fixes.js` 65/65、`_smoke_shushan_replypics.js` 9/9、`_smoke_review_trim.js`、`_smoke_widget_pending_images.js`、`_smoke_review_pics_valid.js` 均通过。
+
 ## [2.2.1-fixed.6.5] - 2026-11-25
 
 ### 🐛 修复
